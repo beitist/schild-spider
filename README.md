@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/schild-spider.png" alt="Schild Spider Logo" width="200">
+</p>
+
 # Schild Spider
 
 Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **SchILD NRW** und angebundenen Zielsystemen.

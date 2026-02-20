@@ -2,11 +2,15 @@ name: Build Windows EXE
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*']   # Triggert bei Tags wie v0.1, v0.1.0, v1.2.3-beta, etc.
 
 jobs:
   build:
     runs-on: windows-latest
+    # Berechtigung zum Erstellen von GitHub Releases
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,11 +21,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
+      # PyInstaller baut die .exe als Single-File mit eingebettetem Icon
       - name: Build EXE
         run: pyinstaller --onefile --windowed --icon=assets/icon.ico --name=SchildSpider main.py
 
+      # Speichert die .exe als Build-Artifact (zum Download über die Actions-Seite)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: SchildSpider.exe
           path: dist/SchildSpider.exe
+
+      # Erstellt automatisch ein GitHub Release mit der .exe als Download-Asset
+      # Der Tag-Name (z.B. "v0.1") wird als Release-Titel verwendet
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SchildSpider.exe
+          generate_release_notes: true  # Erzeugt automatisch Changelog aus Commits
