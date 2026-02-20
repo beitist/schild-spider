@@ -190,9 +190,7 @@ def load_settings(settings_path: str | Path = "settings.json") -> dict:
     return settings
 
 
-def save_settings(
-    settings: dict, settings_path: str | Path = "settings.json"
-) -> None:
+def save_settings(settings: dict, settings_path: str | Path = "settings.json") -> None:
     """Speichert Settings als JSON. Setzt immer die aktuelle Version."""
     settings["settings_version"] = SETTINGS_VERSION
     with open(settings_path, "w", encoding="utf-8") as f:

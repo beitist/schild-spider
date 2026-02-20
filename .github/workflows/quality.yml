@@ -1,0 +1,27 @@
+# Code-Quality-Checks bei jedem Push und Pull-Request.
+# Läuft auf Ubuntu (schneller + günstiger als Windows) und prüft
+# per ruff auf Syntax-, Import- und Style-Fehler.
+name: Code Quality
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ruff ist ein extrem schneller Python-Linter (Rust-basiert),
+      # ersetzt flake8 + isort + pyflakes in einem Tool.
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint (Fehler + Warnungen)
+        run: ruff check .
+
+      - name: Format-Check (Einrückung, Zeilenumbrüche)
+        run: ruff format --check .

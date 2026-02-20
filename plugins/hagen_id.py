@@ -55,9 +55,7 @@ class HagenIdPlugin(PluginBase):
 
     def test_connection(self) -> tuple[bool, str]:
         try:
-            resp = self._session.get(
-                f"{self.api_url}/api/sync/manifest", timeout=10
-            )
+            resp = self._session.get(f"{self.api_url}/api/sync/manifest", timeout=10)
             resp.raise_for_status()
             data = resp.json()
             school = data.get("school_name", "?")
@@ -82,22 +80,22 @@ class HagenIdPlugin(PluginBase):
         return data.get("students", [])
 
     def compute_data_hash(self, student: dict) -> str:
-        parts = "|".join([
-            student.get("first_name", "").lower(),
-            student.get("last_name", "").lower(),
-            student.get("dob", ""),
-            student.get("class_name", "").lower(),
-            student.get("email", "").lower(),
-        ])
+        parts = "|".join(
+            [
+                student.get("first_name", "").lower(),
+                student.get("last_name", "").lower(),
+                student.get("dob", ""),
+                student.get("class_name", "").lower(),
+                student.get("email", "").lower(),
+            ]
+        )
         return hashlib.sha256(parts.encode()).hexdigest()
 
     def apply_new(self, students: list[dict]) -> list[dict]:
         results = []
         for batch in _batched(students, _BATCH_SIZE_NEW):
             payload = {"students": [self._prepare_student(s) for s in batch]}
-            resp = self._session.post(
-                f"{self.api_url}/api/sync/new", json=payload
-            )
+            resp = self._session.post(f"{self.api_url}/api/sync/new", json=payload)
             resp.raise_for_status()
             results.extend(resp.json().get("results", []))
         return results
@@ -106,9 +104,7 @@ class HagenIdPlugin(PluginBase):
         results = []
         for batch in _batched(students, _BATCH_SIZE_CHANGE):
             payload = {"students": [self._prepare_student(s) for s in batch]}
-            resp = self._session.post(
-                f"{self.api_url}/api/sync/change", json=payload
-            )
+            resp = self._session.post(f"{self.api_url}/api/sync/change", json=payload)
             resp.raise_for_status()
             results.extend(resp.json().get("results", []))
         return results
@@ -117,9 +113,7 @@ class HagenIdPlugin(PluginBase):
         results = []
         for batch in _batched(school_internal_ids, _BATCH_SIZE_SUSPEND):
             payload = {"school_internal_ids": batch}
-            resp = self._session.post(
-                f"{self.api_url}/api/sync/suspend", json=payload
-            )
+            resp = self._session.post(f"{self.api_url}/api/sync/suspend", json=payload)
             resp.raise_for_status()
             results.extend(resp.json().get("results", []))
         return results

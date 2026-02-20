@@ -80,6 +80,7 @@ class SchildCsvAdapter(AdapterBase):
             )
 
         import io
+
         reader = csv.DictReader(io.StringIO(content), delimiter=";")
 
         students: list[StudentRecord] = []
@@ -95,6 +96,7 @@ class SchildCsvAdapter(AdapterBase):
         if skipped > 0:
             # Info-Meldung statt stilles Schlucken — hilft bei CSV-Problemen
             import warnings
+
             warnings.warn(
                 f"{skipped} von {skipped + len(students)} CSV-Zeilen "
                 f"konnten nicht geparst werden."
@@ -113,9 +115,7 @@ class SchildCsvAdapter(AdapterBase):
             if not sid:
                 return None
 
-            dob_raw = row.get(
-                _find_csv_key("Geburtsdatum", row), ""
-            ).strip()
+            dob_raw = row.get(_find_csv_key("Geburtsdatum", row), "").strip()
             dob = self._normalize_date(dob_raw)
 
             photo_path = self._find_photo(sid)
@@ -132,6 +132,7 @@ class SchildCsvAdapter(AdapterBase):
         except (KeyError, ValueError) as exc:
             # Fehler loggen statt still verschlucken — erleichtert Debugging
             import warnings
+
             warnings.warn(f"CSV Zeile {row_num} übersprungen: {exc}")
             return None
 

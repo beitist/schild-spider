@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
@@ -94,9 +93,7 @@ class ApplyWorker(QObject):
     error = Signal(str)
     log = Signal(str)
 
-    def __init__(
-        self, settings: dict, changesets: dict[str, ChangeSet]
-    ) -> None:
+    def __init__(self, settings: dict, changesets: dict[str, ChangeSet]) -> None:
         super().__init__()
         self.settings = settings
         self.changesets = changesets
@@ -121,23 +118,17 @@ class ApplyWorker(QObject):
                     self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
 
                 if cs.changed:
-                    self.log.emit(
-                        f"Aktualisiere {len(cs.changed)} Schüler..."
-                    )
+                    self.log.emit(f"Aktualisiere {len(cs.changed)} Schüler...")
                     results = plugin.apply_changes(cs.changed)
                     self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
 
                 if cs.photo_updates:
-                    self.log.emit(
-                        f"Aktualisiere {len(cs.photo_updates)} Fotos..."
-                    )
+                    self.log.emit(f"Aktualisiere {len(cs.photo_updates)} Fotos...")
                     results = plugin.apply_changes(cs.photo_updates)
                     self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
 
                 if cs.suspended:
-                    self.log.emit(
-                        f"Deaktiviere {len(cs.suspended)} Schüler..."
-                    )
+                    self.log.emit(f"Deaktiviere {len(cs.suspended)} Schüler...")
                     results = plugin.apply_suspend(cs.suspended)
                     self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
 
@@ -192,9 +183,7 @@ class MainWindow(QMainWindow):
         # Vorschau-Tree
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Kategorie / Schüler", "Details"])
-        self._tree.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         splitter.addWidget(self._tree)
 
         # Log-Bereich
@@ -214,16 +203,12 @@ class MainWindow(QMainWindow):
         # Buttons
         btn_layout = QHBoxLayout()
         self._btn_compute = QPushButton("Änderungen berechnen")
-        self._btn_compute.setStyleSheet(
-            "padding: 8px 16px; font-size: 13px;"
-        )
+        self._btn_compute.setStyleSheet("padding: 8px 16px; font-size: 13px;")
         self._btn_compute.clicked.connect(self._on_compute)
         btn_layout.addWidget(self._btn_compute)
 
         self._btn_apply = QPushButton("Änderungen anwenden")
-        self._btn_apply.setStyleSheet(
-            "padding: 8px 16px; font-size: 13px;"
-        )
+        self._btn_apply.setStyleSheet("padding: 8px 16px; font-size: 13px;")
         self._btn_apply.setEnabled(False)
         self._btn_apply.clicked.connect(self._on_apply)
         btn_layout.addWidget(self._btn_apply)
@@ -315,7 +300,9 @@ class MainWindow(QMainWindow):
             )
         elif has_changes:
             self._btn_apply.setEnabled(True)
-            self._log_msg("\nVorschau bereit. Prüfe die Änderungen und klicke 'Anwenden'.")
+            self._log_msg(
+                "\nVorschau bereit. Prüfe die Änderungen und klicke 'Anwenden'."
+            )
         else:
             self._log_msg("\nKeine Änderungen gefunden. Alles synchron.")
 
@@ -391,9 +378,7 @@ class MainWindow(QMainWindow):
 
             # Keine Änderungen
             if not (cs.new or cs.changed or cs.suspended or cs.photo_updates):
-                QTreeWidgetItem(
-                    plugin_item, ["Keine Änderungen", "Alles synchron"]
-                )
+                QTreeWidgetItem(plugin_item, ["Keine Änderungen", "Alles synchron"])
 
     # --- Phase 3: Anwenden ---
 

@@ -22,9 +22,7 @@ def compute_changeset(
 
     # Manifest vom Zielsystem holen
     manifest = plugin.get_manifest()
-    target_map: dict[str, dict] = {
-        s["school_internal_id"]: s for s in manifest
-    }
+    target_map: dict[str, dict] = {s["school_internal_id"]: s for s in manifest}
 
     new: list[dict] = []
     changed: list[dict] = []
@@ -77,9 +75,7 @@ def compute_changeset(
     )
 
 
-def _compute_photo_hash_if_available(
-    plugin: PluginBase, photo_path: str
-) -> str | None:
+def _compute_photo_hash_if_available(plugin: PluginBase, photo_path: str) -> str | None:
     """Berechnet den Photo-Hash über das Plugin, falls die Methode existiert."""
     if hasattr(plugin, "compute_photo_hash"):
         return plugin.compute_photo_hash(photo_path)
