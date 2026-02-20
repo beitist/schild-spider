@@ -271,6 +271,10 @@ class MainWindow(QMainWindow):
         worker.error.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
 
+        # Worker UND Thread als Instanz-Attribut halten, damit Pythons
+        # Garbage Collector den Worker nicht vorzeitig abräumt.
+        # Ohne das werden die Signals getrennt und der Thread hängt endlos.
+        self._worker = worker
         self._worker_thread = thread
         thread.start()
 
@@ -409,6 +413,8 @@ class MainWindow(QMainWindow):
         worker.error.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
 
+        # Worker als Instanz-Attribut halten (s. Kommentar in _on_compute)
+        self._worker = worker
         self._worker_thread = thread
         thread.start()
 
