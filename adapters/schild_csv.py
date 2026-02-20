@@ -61,18 +61,53 @@ class SchildCsvAdapter(AdapterBase):
         if not self.csv_path.exists():
             raise FileNotFoundError(f"CSV-Datei nicht gefunden: {self.csv_path}")
 
-        students: list[StudentRecord] = []
+        # Encoding-Erkennung: UTF-8-sig zuerst (handhabt BOM automatisch),
+        # Fallback auf ISO-8859-1 (ältere SchILD-Versionen).
+        # Ohne das würde ein UTF-8-BOM als "ï»¿" vor dem ersten Header
+        # landen und alle Key-Lookups still fehlschlagen.
+        content = None
+        for encoding in ("utf-8-sig", "iso-8859-1"):
+            try:
+                content = self.csv_path.read_text(encoding=encoding)
+                break
+            except (UnicodeDecodeError, ValueError):
+                continue
 
-        with open(self.csv_path, encoding="iso-8859-1", newline="") as f:
-            reader = csv.DictReader(f, delimiter=";")
-            for row in reader:
-                record = self._parse_row(row)
-                if record:
-                    students.append(record)
+        if content is None:
+            raise ValueError(
+                f"CSV-Datei konnte weder als UTF-8 noch als ISO-8859-1 "
+                f"gelesen werden: {self.csv_path}"
+            )
+
+        import io
+        reader = csv.DictReader(io.StringIO(content), delimiter=";")
+
+        students: list[StudentRecord] = []
+        skipped = 0
+
+        for row_num, row in enumerate(reader, start=2):  # Zeile 1 = Header
+            record = self._parse_row(row, row_num)
+            if record:
+                students.append(record)
+            else:
+                skipped += 1
+
+        if skipped > 0:
+            # Info-Meldung statt stilles Schlucken — hilft bei CSV-Problemen
+            import warnings
+            warnings.warn(
+                f"{skipped} von {skipped + len(students)} CSV-Zeilen "
+                f"konnten nicht geparst werden."
+            )
 
         return students
 
-    def _parse_row(self, row: dict) -> StudentRecord | None:
+    def _parse_row(self, row: dict, row_num: int = 0) -> StudentRecord | None:
+        """Parst eine CSV-Zeile in ein StudentRecord.
+
+        Gibt None zurück bei fehlenden Pflichtfeldern, loggt aber den Grund
+        statt das Problem still zu verschlucken.
+        """
         try:
             sid = row[_CSV_FIELD_MAP_KEY_FOR("school_internal_id", row)].strip()
             if not sid:
@@ -94,7 +129,10 @@ class SchildCsvAdapter(AdapterBase):
                 class_name=row.get(_find_csv_key("Klasse", row), "").strip(),
                 photo_path=str(photo_path) if photo_path else None,
             )
-        except (KeyError, ValueError):
+        except (KeyError, ValueError) as exc:
+            # Fehler loggen statt still verschlucken — erleichtert Debugging
+            import warnings
+            warnings.warn(f"CSV Zeile {row_num} übersprungen: {exc}")
             return None
 
     def _normalize_date(self, date_str: str) -> str:

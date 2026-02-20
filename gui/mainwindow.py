@@ -43,31 +43,43 @@ class ComputeWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        import warnings
+
         try:
-            self.log.emit("Lade Schülerdaten...")
-            adapter = load_adapter(self.settings)
-            students = adapter.load()
-            self.log.emit(f"{len(students)} Schüler geladen.")
+            # Warnings (z.B. CSV-Parse-Fehler) ins GUI-Log umleiten,
+            # damit der Nutzer sieht welche Zeilen übersprungen wurden.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
 
-            self.log.emit("Lade aktive Plugins...")
-            plugins = load_plugins(self.settings)
-            if not plugins:
-                self.error.emit("Keine aktiven Plugins konfiguriert.")
-                return
+                self.log.emit("Lade Schülerdaten...")
+                adapter = load_adapter(self.settings)
+                students = adapter.load()
+                self.log.emit(f"{len(students)} Schüler geladen.")
 
-            max_suspend = self.settings.get("failsafe", {}).get(
-                "max_suspend_percentage", 15.0
-            )
+                # Aufgefangene Warnings ausgeben
+                for w in caught:
+                    self.log.emit(f"⚠ {w.message}")
+                caught.clear()
 
-            results: dict[str, ChangeSet] = {}
-            for name, plugin in plugins:
-                self.log.emit(f"Berechne ChangeSet für {name}...")
-                cs = compute_changeset(students, plugin, max_suspend)
-                results[name] = cs
-                self.log.emit(
-                    f"  {name}: {len(cs.new)} neu, {len(cs.changed)} geändert, "
-                    f"{len(cs.suspended)} abgemeldet, {len(cs.photo_updates)} Foto-Updates"
+                self.log.emit("Lade aktive Plugins...")
+                plugins = load_plugins(self.settings)
+                if not plugins:
+                    self.error.emit("Keine aktiven Plugins konfiguriert.")
+                    return
+
+                max_suspend = self.settings.get("failsafe", {}).get(
+                    "max_suspend_percentage", 15.0
                 )
+
+                results: dict[str, ChangeSet] = {}
+                for name, plugin in plugins:
+                    self.log.emit(f"Berechne ChangeSet für {name}...")
+                    cs = compute_changeset(students, plugin, max_suspend)
+                    results[name] = cs
+                    self.log.emit(
+                        f"  {name}: {len(cs.new)} neu, {len(cs.changed)} geändert, "
+                        f"{len(cs.suspended)} abgemeldet, {len(cs.photo_updates)} Foto-Updates"
+                    )
 
             self.finished.emit(results)
 
