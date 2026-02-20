@@ -281,7 +281,6 @@ class MainWindow(QMainWindow):
         worker.error.connect(self._on_worker_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
 
         # Worker UND Thread als Instanz-Attribut halten, damit Pythons
         # Garbage Collector den Worker nicht vorzeitig abräumt.
@@ -419,11 +418,15 @@ class MainWindow(QMainWindow):
 
         thread.started.connect(worker.run)
         worker.log.connect(self._log_msg)
-        worker.finished.connect(lambda: self._on_apply_done())
         worker.error.connect(self._on_worker_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
+        # _on_apply_done wird an thread.finished gebunden (nicht
+        # worker.finished), damit der Thread vollständig beendet ist
+        # bevor die QMessageBox den Event-Loop blockiert.
+        # Andernfalls kann deleteLater den Worker/Thread löschen
+        # während die MessageBox noch offen ist → Absturz.
+        thread.finished.connect(self._on_apply_done)
 
         # Worker als Instanz-Attribut halten (s. Kommentar in _on_compute)
         self._worker = worker

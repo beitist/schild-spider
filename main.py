@@ -1,10 +1,11 @@
 """Schild Spider — Startpunkt der Anwendung."""
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 
 from core.paths import asset_path
 from gui.mainwindow import MainWindow
@@ -33,11 +34,23 @@ def main() -> None:
         )
         splash = QSplashScreen(splash_pixmap)
         splash.show()
-        # Sofort zeichnen, damit der Splash sichtbar wird bevor
-        # das Hauptfenster (und Plugins etc.) geladen werden
         app.processEvents()
     else:
         splash = None
+
+    # --- Erststart: Setup-Wizard wenn keine settings.json vorhanden ---
+    if not Path("settings.json").exists():
+        # Splash ausblenden bevor der Wizard erscheint
+        if splash is not None:
+            splash.close()
+            splash = None
+
+        from gui.setup_wizard import SetupWizard
+
+        wizard = SetupWizard()
+        if wizard.exec() != SetupWizard.DialogCode.Accepted:
+            # Wizard abgebrochen / geschlossen → App beenden
+            sys.exit(0)
 
     window = MainWindow()
     window.show()

@@ -55,14 +55,14 @@ pip install -r requirements.txt
 
 ### Konfiguration
 
-```bash
-cp settings.example.json settings.json
-```
+Beim **ersten Start** öffnet sich ein Einrichtungs-Assistent:
+1. Schulname eingeben
+2. Datenquelle (Adapter) wählen
+3. Gewünschte Zielsysteme (Plugins) aktivieren
 
-Einstellungen direkt in der App unter **"Einstellungen..."** konfigurieren:
-1. Datenquelle wählen und Pfade setzen
-2. Plugins aktivieren und API-Keys eintragen
-3. Verbindung testen
+Anschließend unter **„Einstellungen..."** die Pfade und API-Keys eintragen und die Verbindung testen.
+
+> Bei Updates wird die `settings.json` automatisch migriert — bestehende Einstellungen bleiben erhalten.
 
 ### Starten
 
@@ -78,15 +78,14 @@ Die vorkompilierte `.exe` ist auf der [Releases-Seite](https://github.com/beitis
 
 ```
 schild-spider/
-├── main.py                  # Einstiegspunkt
+├── main.py                  # Einstiegspunkt + Splash + Setup-Wizard
 ├── requirements.txt
-├── settings.example.json    # Vorlage für settings.json
 │
 ├── core/
 │   ├── models.py            # StudentRecord, ChangeSet, ConfigField
 │   ├── engine.py            # Diff-Logik + Failsafe
 │   ├── paths.py             # Asset-Pfade (PyInstaller-kompatibel)
-│   └── plugin_loader.py     # Adapter- und Plugin-Registry
+│   └── plugin_loader.py     # Registry, Settings-Versionierung, Migration
 │
 ├── adapters/
 │   ├── base.py              # AdapterBase (ABC)
@@ -98,7 +97,8 @@ schild-spider/
 │
 ├── gui/
 │   ├── mainwindow.py        # Hauptfenster (3-Phasen-Workflow)
-│   └── settings_dialog.py   # Einstellungen + Plugin-Manager
+│   ├── settings_dialog.py   # Einstellungen + Plugin-Manager
+│   └── setup_wizard.py      # Erststart-Assistent
 │
 ├── documentation/
 │   └── howto.md              # Benutzerhandbuch
