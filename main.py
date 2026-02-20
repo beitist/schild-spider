@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from core.paths import asset_path
+from core.plugin_loader import SETTINGS_VERSION  # aus plugin_loader importiert
 from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
@@ -15,6 +16,7 @@ APP_NAME = "Schild Spider"
 APP_VERSION = "0.7"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
+# SETTINGS_VERSION kommt aus core/plugin_loader.py (steuert die Migration)
 
 
 def _build_splash_pixmap() -> QPixmap | None:
