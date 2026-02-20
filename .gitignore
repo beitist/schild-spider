@@ -1,0 +1,30 @@
+# Lokale Konfiguration (enthält API-Keys!)
+settings.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual Environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & Cache
+logs/
+cache/
+
+# Lokale Daten
+data/
+internal/
