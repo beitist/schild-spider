@@ -232,9 +232,19 @@ class MainWindow(QMainWindow):
 
     def _open_settings_dialog(self) -> None:
         """Öffnet den Settings-Dialog mit Plugin-Manager."""
-        dlg = SettingsDialog(self._settings, parent=self)
-        dlg.settings_changed.connect(self._load_settings)
-        dlg.exec()
+        try:
+            dlg = SettingsDialog(self._settings, parent=self)
+            dlg.settings_changed.connect(self._load_settings)
+            dlg.exec()
+        except Exception as exc:
+            # Im --windowed-Modus (PyInstaller) gibt es keine Konsole —
+            # ohne try/except würde der Fehler stumm verschluckt.
+            self._log_msg(f"FEHLER beim Öffnen der Einstellungen: {exc}")
+            QMessageBox.critical(
+                self,
+                "Einstellungen konnten nicht geöffnet werden",
+                f"Fehler: {exc}",
+            )
 
     # --- Phase 1: Berechnen ---
 

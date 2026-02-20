@@ -23,7 +23,22 @@ jobs:
 
       # PyInstaller baut die .exe als Single-File mit eingebettetem Icon
       - name: Build EXE
-        run: pyinstaller --onefile --windowed --icon=assets/icon.ico --name=SchildSpider main.py
+        # --collect-submodules: Adapter- und Plugin-Module werden per
+        # importlib.import_module() dynamisch geladen — PyInstaller erkennt
+        # sie nicht automatisch. collect-submodules sammelt ALLE Module in
+        # diesen Packages ein, sodass neue Adapter/Plugins automatisch
+        # mitgebundelt werden.
+        # --add-data: Assets (Icon, Logo) werden in die EXE eingebettet,
+        # damit sie zur Laufzeit für Fenster-Icon und Splash Screen
+        # verfügbar sind. Separator ist ";" auf Windows.
+        run: >-
+          pyinstaller --onefile --windowed
+          --icon=assets/icon.ico
+          --name=SchildSpider
+          --add-data "assets;assets"
+          --collect-submodules=adapters
+          --collect-submodules=plugins
+          main.py
 
       # Speichert die .exe als Build-Artifact (zum Download über die Actions-Seite)
       - name: Upload artifact
