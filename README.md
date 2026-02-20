@@ -45,7 +45,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 ### Installation (Entwicklung)
 
 ```bash
-git clone https://github.com/beiti/schild-spider.git
+git clone https://github.com/beitist/schild-spider.git
 cd schild-spider
 python -m venv .venv
 .venv/Scripts/activate        # Windows
@@ -72,7 +72,7 @@ python main.py
 
 ### Windows .exe
 
-Die vorkompilierte `.exe` ist auf der [Releases-Seite](https://github.com/beiti/schild-spider/releases) verfügbar. Wird automatisch per GitHub Actions bei jedem Tag gebaut.
+Die vorkompilierte `.exe` ist auf der [Releases-Seite](https://github.com/beitist/schild-spider/releases) verfügbar. Wird automatisch per GitHub Actions bei jedem Tag gebaut.
 
 ## Projektstruktur
 
@@ -85,6 +85,7 @@ schild-spider/
 ├── core/
 │   ├── models.py            # StudentRecord, ChangeSet, ConfigField
 │   ├── engine.py            # Diff-Logik + Failsafe
+│   ├── paths.py             # Asset-Pfade (PyInstaller-kompatibel)
 │   └── plugin_loader.py     # Adapter- und Plugin-Registry
 │
 ├── adapters/
@@ -125,6 +126,15 @@ schild-spider/
 3. In `core/plugin_loader.py` → `_ADAPTER_REGISTRY` eintragen
 
 Die GUI zeigt neue Adapter und Plugins automatisch mit den richtigen Eingabefeldern an.
+
+### Windows EXE bauen
+
+Neue Adapter/Plugins werden automatisch in die EXE eingebundelt (`--collect-submodules` in der Build-Config). Einfach einen neuen Git-Tag pushen — GitHub Actions baut die EXE und erstellt ein Release:
+
+```bash
+git tag v1.0
+git push origin main --tags
+```
 
 ## Lizenz
 
