@@ -39,6 +39,7 @@ jobs:
           --hidden-import=adapters
           --hidden-import=adapters.base
           --hidden-import=adapters.schild_csv
+          --hidden-import=adapters.schild_db
           --hidden-import=plugins
           --hidden-import=plugins.base
           --hidden-import=plugins.hagen_id
