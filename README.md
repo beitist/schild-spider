@@ -6,6 +6,8 @@
 
 Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **SchILD NRW** und angebundenen Zielsystemen.
 
+> **Public Beta** — Dieses Projekt befindet sich in aktiver Entwicklung. Funktionen können unvollständig sein oder sich ändern. Nutzung auf eigene Verantwortung. Feedback, Fehlerberichte und Feature-Wünsche sind willkommen — einfach ein [Issue](https://github.com/beitist/schild-spider/issues) erstellen oder melden!
+
 ```
 ┌──────────────┐    ┌──────────┐    ┌──────────────┐
 │   ADAPTER    │───>│   CORE   │───>│   PLUGINS    │
@@ -23,13 +25,16 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 - **Failsafe-Schutz** — Blockiert automatisch bei >15% Deaktivierungen (Schutz vor unvollständigen Datenexporten)
 - **Plugin-System** — Jedes Plugin beschreibt sich selbst (Config-Felder, Verbindungstest), die GUI rendert dynamisch
 - **Adapter-System** — Verschiedene Datenquellen (CSV-Export, DB-Zugriff) über einheitliche Schnittstelle
+- **Email-Vorschau** — Generierte Email-Adressen werden vor dem Anwenden in der Vorschau angezeigt
+- **Klassengruppen** — Automatische Erstellung von SuS- und KuK-Gruppen pro Klasse (M365)
+- **Write-Back** — Generierte Email-Adressen können in die SchILD-DB zurückgeschrieben werden
 
 ## Unterstützte Systeme
 
 | Typ | System | Status |
 |-----|--------|--------|
 | Adapter | SchILD CSV-Export | Verfügbar |
-| Adapter | SchILD DB (MariaDB/ODBC) | Verfügbar |
+| Adapter | SchILD DB (MariaDB) | Verfügbar |
 | Plugin | Hagen-ID (Schülerausweise) | Verfügbar |
 | Plugin | Microsoft 365 (Graph API) | Verfügbar |
 | Plugin | Moodle | Geplant |
@@ -40,7 +45,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 ### Voraussetzungen
 
 - Python 3.12+
-- Abhängigkeiten: `PySide6`, `requests`, `Pillow`
+- Abhängigkeiten: `PySide6`, `requests`, `Pillow`, `PyMySQL`
 
 ### Installation (Entwicklung)
 
@@ -92,7 +97,7 @@ schild-spider/
 ├── adapters/
 │   ├── base.py              # AdapterBase (ABC)
 │   ├── schild_csv.py        # CSV-Import
-│   └── schild_db.py         # MariaDB/ODBC-Direktzugriff
+│   └── schild_db.py         # MariaDB-Direktzugriff (pymysql)
 │
 ├── plugins/
 │   ├── base.py              # PluginBase (ABC)
@@ -170,6 +175,7 @@ Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
 2. Von `PluginBase` erben und alle Methoden implementieren:
    - `plugin_name()`, `config_schema()`, `from_config()`, `test_connection()`
    - `get_manifest()`, `compute_data_hash()`, `apply_new()`, `apply_changes()`, `apply_suspend()`
+   - Optional: `enrich_preview()` — Vorschau-Daten anreichern (z.B. Emails vorgenerieren)
 3. In `core/plugin_loader.py` → `_PLUGIN_REGISTRY` eintragen
 
 ### Adapter
@@ -178,6 +184,7 @@ Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
 2. Von `AdapterBase` erben:
    - `adapter_name()`, `config_schema()`, `from_config()`
    - `load() -> list[StudentRecord]`
+   - Optional: `load_teachers()`, `supports_write_back()`, `write_back()`
 3. In `core/plugin_loader.py` → `_ADAPTER_REGISTRY` eintragen
 
 Die GUI zeigt neue Adapter und Plugins automatisch mit den richtigen Eingabefeldern an.
