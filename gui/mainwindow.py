@@ -55,6 +55,13 @@ class ComputeWorker(QObject):
                 students = adapter.load()
                 self.log.emit(f"{len(students)} Schüler geladen.")
 
+                # Lehrerdaten laden
+                teachers = adapter.load_teachers()
+                if teachers:
+                    self.log.emit(f"{len(teachers)} Lehrer geladen.")
+                else:
+                    self.log.emit("Keine Lehrerdaten (CSV nicht konfiguriert).")
+
                 # Aufgefangene Warnings ausgeben
                 for w in caught:
                     self.log.emit(f"⚠ {w.message}")

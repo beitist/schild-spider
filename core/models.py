@@ -17,6 +17,21 @@ class StudentRecord:
 
 
 @dataclass
+class TeacherRecord:
+    """Einheitliches Lehrer-Format (Output aller Adapter)."""
+
+    first_name: str
+    last_name: str
+    dob: str  # YYYY-MM-DD
+    job_title: str = ""  # Amtsbezeichnung (optional)
+
+    @property
+    def composite_key(self) -> str:
+        """Eindeutiger Schlüssel: Nachname + Geburtsdatum."""
+        return f"{self.last_name}|{self.dob}"
+
+
+@dataclass
 class ChangeSet:
     """Ergebnis der Diff-Berechnung zwischen Quelle und Zielsystem."""
 

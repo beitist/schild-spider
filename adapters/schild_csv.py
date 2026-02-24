@@ -1,28 +1,90 @@
 from __future__ import annotations
 
 import csv
+import io
+import warnings
 from pathlib import Path
 
 from adapters.base import AdapterBase
-from core.models import ConfigField, StudentRecord
+from core.models import ConfigField, StudentRecord, TeacherRecord
 
-# Mapping: CSV-Spaltenname → StudentRecord-Feld
-_CSV_FIELD_MAP = {
-    "Interne ID-Nummer": "school_internal_id",
-    "Vorname": "first_name",
-    "Nachname": "last_name",
-    "Geburtsdatum": "dob",
-    "E-Mail (Schule)": "email",
-    "Klasse": "class_name",
+# ---------------------------------------------------------------------------
+# CSV-Feld-Varianten: RecordField → mögliche CSV-Spaltennamen
+# Erste Übereinstimmung gewinnt (exakt, dann case-insensitive).
+# ---------------------------------------------------------------------------
+
+_STUDENT_FIELD_VARIANTS: dict[str, list[str]] = {
+    "school_internal_id": ["Interne ID-Nummer", "Interne ID", "ID-Nummer"],
+    "first_name": ["Vorname"],
+    "last_name": ["Nachname", "Name"],
+    "dob": ["Geburtsdatum", "Geb.-Datum", "GebDatum"],
+    "email": ["E-Mail (Schule)", "E-Mail", "Email"],
+    "class_name": ["Klasse", "Klassenbezeichnung"],
 }
+
+_TEACHER_FIELD_VARIANTS: dict[str, list[str]] = {
+    "first_name": ["Vorname"],
+    "last_name": ["Nachname", "Name"],
+    "dob": ["Geburtsdatum", "Geb.-Datum", "GebDatum"],
+    "job_title": ["Amtsbezeichnung", "Amtsbez.", "Amtsbez", "Dienstbezeichnung"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Generische CSV-Feld-Erkennung
+# ---------------------------------------------------------------------------
+
+
+def _resolve_csv_column(
+    field_name: str,
+    row: dict,
+    field_variants: dict[str, list[str]],
+) -> str | None:
+    """Findet den tatsächlichen CSV-Spaltennamen für ein Record-Feld.
+
+    Probiert jede Variante: zuerst exakter Match, dann case-insensitive.
+    Gibt None zurück wenn keine Variante passt.
+    """
+    variants = field_variants.get(field_name, [])
+    for variant in variants:
+        if variant in row:
+            return variant
+        for key in row:
+            if key.strip().lower() == variant.lower():
+                return key
+    return None
+
+
+def _get_field_value(
+    field_name: str,
+    row: dict,
+    field_variants: dict[str, list[str]],
+    default: str = "",
+) -> str:
+    """Extrahiert einen Feldwert aus einer CSV-Zeile per Varianten-Lookup."""
+    col = _resolve_csv_column(field_name, row, field_variants)
+    if col is None:
+        return default
+    return row.get(col, default).strip()
+
+
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
 
 
 class SchildCsvAdapter(AdapterBase):
     """Liest SchILD-CSV-Export (;-getrennt, ISO-8859-1) + Fotos aus lokalem Ordner."""
 
-    def __init__(self, csv_path: str, photos_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        csv_path: str,
+        photos_dir: str | None = None,
+        teachers_csv_path: str | None = None,
+    ) -> None:
         self.csv_path = Path(csv_path)
         self.photos_dir = Path(photos_dir) if photos_dir else None
+        self.teachers_csv_path = Path(teachers_csv_path) if teachers_csv_path else None
 
     # --- Metadaten ---
 
@@ -35,9 +97,16 @@ class SchildCsvAdapter(AdapterBase):
         return [
             ConfigField(
                 key="csv_path",
-                label="CSV-Datei",
+                label="Schüler-CSV-Datei",
                 field_type="path",
                 placeholder="C:\\SchILD\\Export\\schueler.csv",
+            ),
+            ConfigField(
+                key="teachers_csv_path",
+                label="Lehrer-CSV-Datei",
+                field_type="path",
+                required=False,
+                placeholder="C:\\SchILD\\Export\\lehrer.csv",
             ),
             ConfigField(
                 key="photos_dir",
@@ -53,6 +122,7 @@ class SchildCsvAdapter(AdapterBase):
         return cls(
             csv_path=config.get("csv_path", ""),
             photos_dir=config.get("photos_dir") or None,
+            teachers_csv_path=config.get("teachers_csv_path") or None,
         )
 
     # --- Interface ---
@@ -61,25 +131,12 @@ class SchildCsvAdapter(AdapterBase):
         if not self.csv_path.exists():
             raise FileNotFoundError(f"CSV-Datei nicht gefunden: {self.csv_path}")
 
-        # Encoding-Erkennung: UTF-8-sig zuerst (handhabt BOM automatisch),
-        # Fallback auf ISO-8859-1 (ältere SchILD-Versionen).
-        # Ohne das würde ein UTF-8-BOM als "ï»¿" vor dem ersten Header
-        # landen und alle Key-Lookups still fehlschlagen.
-        content = None
-        for encoding in ("utf-8-sig", "iso-8859-1"):
-            try:
-                content = self.csv_path.read_text(encoding=encoding)
-                break
-            except (UnicodeDecodeError, ValueError):
-                continue
-
+        content = self._read_csv_content(self.csv_path)
         if content is None:
             raise ValueError(
                 f"CSV-Datei konnte weder als UTF-8 noch als ISO-8859-1 "
                 f"gelesen werden: {self.csv_path}"
             )
-
-        import io
 
         reader = csv.DictReader(io.StringIO(content), delimiter=";")
 
@@ -94,15 +151,43 @@ class SchildCsvAdapter(AdapterBase):
                 skipped += 1
 
         if skipped > 0:
-            # Info-Meldung statt stilles Schlucken — hilft bei CSV-Problemen
-            import warnings
-
             warnings.warn(
-                f"{skipped} von {skipped + len(students)} CSV-Zeilen "
+                f"{skipped} von {skipped + len(students)} Schüler-CSV-Zeilen "
                 f"konnten nicht geparst werden."
             )
 
         return students
+
+    def load_teachers(self) -> list[TeacherRecord]:
+        """Liest Lehrerdaten aus einer separaten CSV-Datei."""
+        if self.teachers_csv_path is None or not self.teachers_csv_path.exists():
+            return []
+
+        content = self._read_csv_content(self.teachers_csv_path)
+        if content is None:
+            return []
+
+        reader = csv.DictReader(io.StringIO(content), delimiter=";")
+
+        teachers: list[TeacherRecord] = []
+        skipped = 0
+
+        for row_num, row in enumerate(reader, start=2):
+            record = self._parse_teacher_row(row, row_num)
+            if record:
+                teachers.append(record)
+            else:
+                skipped += 1
+
+        if skipped > 0:
+            warnings.warn(
+                f"{skipped} von {skipped + len(teachers)} Lehrer-CSV-Zeilen "
+                f"konnten nicht geparst werden."
+            )
+
+        return teachers
+
+    # --- Parsing ---
 
     def _parse_row(self, row: dict, row_num: int = 0) -> StudentRecord | None:
         """Parst eine CSV-Zeile in ein StudentRecord.
@@ -111,30 +196,66 @@ class SchildCsvAdapter(AdapterBase):
         statt das Problem still zu verschlucken.
         """
         try:
-            sid = row[_CSV_FIELD_MAP_KEY_FOR("school_internal_id", row)].strip()
+            sid = _get_field_value("school_internal_id", row, _STUDENT_FIELD_VARIANTS)
             if not sid:
                 return None
 
-            dob_raw = row.get(_find_csv_key("Geburtsdatum", row), "").strip()
+            dob_raw = _get_field_value("dob", row, _STUDENT_FIELD_VARIANTS)
             dob = self._normalize_date(dob_raw)
 
             photo_path = self._find_photo(sid)
 
             return StudentRecord(
                 school_internal_id=sid,
-                first_name=row.get(_find_csv_key("Vorname", row), "").strip(),
-                last_name=row.get(_find_csv_key("Nachname", row), "").strip(),
+                first_name=_get_field_value("first_name", row, _STUDENT_FIELD_VARIANTS),
+                last_name=_get_field_value("last_name", row, _STUDENT_FIELD_VARIANTS),
                 dob=dob,
-                email=row.get(_find_csv_key("E-Mail (Schule)", row), "").strip(),
-                class_name=row.get(_find_csv_key("Klasse", row), "").strip(),
+                email=_get_field_value("email", row, _STUDENT_FIELD_VARIANTS),
+                class_name=_get_field_value("class_name", row, _STUDENT_FIELD_VARIANTS),
                 photo_path=str(photo_path) if photo_path else None,
             )
         except (KeyError, ValueError) as exc:
-            # Fehler loggen statt still verschlucken — erleichtert Debugging
-            import warnings
-
             warnings.warn(f"CSV Zeile {row_num} übersprungen: {exc}")
             return None
+
+    def _parse_teacher_row(self, row: dict, row_num: int = 0) -> TeacherRecord | None:
+        """Parst eine CSV-Zeile in ein TeacherRecord.
+
+        Pflichtfelder: last_name + dob (bilden den composite_key).
+        """
+        try:
+            last_name = _get_field_value("last_name", row, _TEACHER_FIELD_VARIANTS)
+            dob_raw = _get_field_value("dob", row, _TEACHER_FIELD_VARIANTS)
+
+            if not last_name or not dob_raw:
+                return None
+
+            dob = self._normalize_date(dob_raw)
+
+            return TeacherRecord(
+                first_name=_get_field_value("first_name", row, _TEACHER_FIELD_VARIANTS),
+                last_name=last_name,
+                dob=dob,
+                job_title=_get_field_value("job_title", row, _TEACHER_FIELD_VARIANTS),
+            )
+        except (KeyError, ValueError) as exc:
+            warnings.warn(f"Lehrer-CSV Zeile {row_num} übersprungen: {exc}")
+            return None
+
+    # --- Hilfsmethoden ---
+
+    def _read_csv_content(self, path: Path) -> str | None:
+        """Liest CSV-Inhalt mit Encoding-Erkennung (UTF-8-sig, ISO-8859-1)."""
+        for encoding in ("utf-8-sig", "iso-8859-1"):
+            try:
+                return path.read_text(encoding=encoding)
+            except (UnicodeDecodeError, ValueError):
+                continue
+        warnings.warn(
+            f"CSV-Datei konnte weder als UTF-8 noch als ISO-8859-1 "
+            f"gelesen werden: {path}"
+        )
+        return None
 
     def _normalize_date(self, date_str: str) -> str:
         """Konvertiert deutsches Datumsformat (DD.MM.YYYY) nach ISO (YYYY-MM-DD)."""
@@ -158,22 +279,3 @@ class SchildCsvAdapter(AdapterBase):
                 return photo
 
         return None
-
-
-def _find_csv_key(display_name: str, row: dict) -> str:
-    """Findet den passenden Schlüssel im CSV-Row-Dict (exakter Match)."""
-    if display_name in row:
-        return display_name
-    # Fallback: case-insensitive
-    for key in row:
-        if key.strip().lower() == display_name.lower():
-            return key
-    return display_name
-
-
-def _CSV_FIELD_MAP_KEY_FOR(field_name: str, row: dict) -> str:
-    """Findet den CSV-Spaltennamen für ein StudentRecord-Feld."""
-    for csv_col, record_field in _CSV_FIELD_MAP.items():
-        if record_field == field_name:
-            return _find_csv_key(csv_col, row)
-    raise KeyError(f"Kein CSV-Mapping für Feld: {field_name}")

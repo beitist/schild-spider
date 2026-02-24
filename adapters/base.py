@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.models import ConfigField, StudentRecord
+from core.models import ConfigField, StudentRecord, TeacherRecord
 
 
 class AdapterBase(ABC):
@@ -34,3 +34,7 @@ class AdapterBase(ABC):
     def load(self) -> list[StudentRecord]:
         """Liest Schülerdaten aus der Quelle und gibt sie im einheitlichen Format zurück."""
         ...
+
+    def load_teachers(self) -> list[TeacherRecord]:
+        """Liest Lehrerdaten aus der Quelle. Standard: leere Liste."""
+        return []
