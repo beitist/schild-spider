@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class CourseAssignment:
+    """Fach-/Kurszuordnung eines Schülers."""
+
+    course_name: str  # Fachbezeichnung (z.B. "Mathematik")
+    teacher_name: str  # Fachlehrkraft (z.B. "Müller")
+    course_id: str = ""  # Optionale Kurs-ID
+
+
+@dataclass
 class StudentRecord:
     """Einheitliches Schüler-Format (Output aller Adapter)."""
 
@@ -14,6 +23,11 @@ class StudentRecord:
     email: str
     class_name: str
     photo_path: str | None = None
+    # Klassenlehrer (aus Klassen-Tabelle, denormalisiert auf Schüler)
+    class_teacher_1: str = ""
+    class_teacher_2: str = ""
+    # Kurse/Fächer (nur via DB-Adapter verfügbar)
+    courses: list[CourseAssignment] = field(default_factory=list)
 
 
 @dataclass

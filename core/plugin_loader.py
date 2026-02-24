@@ -12,6 +12,7 @@ from plugins.base import PluginBase
 
 _ADAPTER_REGISTRY: dict[str, tuple[str, str]] = {
     "schild_csv": ("adapters.schild_csv", "SchildCsvAdapter"),
+    "schild_db": ("adapters.schild_db", "SchildDbAdapter"),
 }
 
 _PLUGIN_REGISTRY: dict[str, tuple[str, str]] = {
@@ -84,7 +85,7 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 
 # Wird bei jeder strukturellen Änderung am Settings-Schema hochgezählt.
 # load_settings() prüft dies und migriert automatisch.
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 
 def generate_default_settings(
