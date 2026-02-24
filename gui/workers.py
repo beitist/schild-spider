@@ -103,11 +103,13 @@ class PluginApplyWorker(QObject):
         plugin_key: str,
         plugin: PluginBase,
         changeset: ChangeSet,
+        settings: dict | None = None,
     ) -> None:
         super().__init__()
         self.plugin_key = plugin_key
         self.plugin = plugin
         self.changeset = changeset
+        self.settings = settings
 
     @Slot()
     def run(self) -> None:
@@ -134,7 +136,35 @@ class PluginApplyWorker(QObject):
                 results = self.plugin.apply_suspend(cs.suspended)
                 self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
 
+            # Write-back: generierte Daten an den Adapter zurückschreiben
+            self._handle_write_back()
+
             self.finished.emit(self.plugin_key)
 
         except Exception as exc:
             self.error.emit(self.plugin_key, str(exc))
+
+    def _handle_write_back(self) -> None:
+        """Schreibt vom Plugin generierte Daten an den Adapter zurück."""
+        write_back_data = self.plugin.get_write_back_data()
+        if not write_back_data or not self.settings:
+            return
+
+        try:
+            adapter = load_adapter(self.settings)
+            if not adapter.supports_write_back():
+                self.log.emit(
+                    f"  {len(write_back_data)} Daten für Write-back, "
+                    "aber Adapter unterstützt kein Write-back."
+                )
+                return
+
+            self.log.emit(
+                f"  Schreibe {len(write_back_data)} generierte Werte zurück..."
+            )
+            results = adapter.write_back(write_back_data)
+            ok = sum(1 for r in results if r.get("success"))
+            fail = len(results) - ok
+            self.log.emit(f"  Write-back: {ok} OK, {fail} Fehler")
+        except Exception as exc:
+            self.log.emit(f"  Write-back Fehler: {exc}")

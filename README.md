@@ -29,9 +29,9 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 | Typ | System | Status |
 |-----|--------|--------|
 | Adapter | SchILD CSV-Export | Verfügbar |
-| Adapter | SchILD DB (MariaDB/ODBC) | Geplant |
+| Adapter | SchILD DB (MariaDB/ODBC) | Verfügbar |
 | Plugin | Hagen-ID (Schülerausweise) | Verfügbar |
-| Plugin | Microsoft 365 (Graph API) | Geplant |
+| Plugin | Microsoft 365 (Graph API) | Verfügbar |
 | Plugin | Moodle | Geplant |
 | Plugin | Untis | Geplant |
 
@@ -84,28 +84,83 @@ schild-spider/
 ├── core/
 │   ├── models.py            # StudentRecord, ChangeSet, ConfigField
 │   ├── engine.py            # Diff-Logik + Failsafe
+│   ├── email_generator.py   # Email-Erzeugung mit Transliteration
+│   ├── graph_client.py      # Microsoft Graph REST API Client
 │   ├── paths.py             # Asset-Pfade (PyInstaller-kompatibel)
 │   └── plugin_loader.py     # Registry, Settings-Versionierung, Migration
 │
 ├── adapters/
 │   ├── base.py              # AdapterBase (ABC)
-│   └── schild_csv.py        # CSV-Import
+│   ├── schild_csv.py        # CSV-Import
+│   └── schild_db.py         # MariaDB/ODBC-Direktzugriff
 │
 ├── plugins/
 │   ├── base.py              # PluginBase (ABC)
-│   └── hagen_id.py          # Hagen-ID REST API
+│   ├── hagen_id.py          # Hagen-ID REST API
+│   └── m365.py              # Microsoft 365 / Entra ID (Graph API)
 │
 ├── gui/
 │   ├── mainwindow.py        # Hauptfenster (3-Phasen-Workflow)
 │   ├── settings_dialog.py   # Einstellungen + Plugin-Manager
-│   └── setup_wizard.py      # Erststart-Assistent
+│   ├── setup_wizard.py      # Erststart-Assistent
+│   └── workers.py           # Hintergrund-Worker (Load, Compute, Apply)
 │
 ├── documentation/
 │   └── howto.md              # Benutzerhandbuch
 │
 └── .github/workflows/
-    └── build-exe.yml         # CI: PyInstaller Build
+    ├── build-exe.yml         # CI: PyInstaller Build → GitHub Release
+    └── quality.yml           # CI: Ruff Lint + Format
 ```
+
+## Microsoft 365 / Entra ID einrichten
+
+Das M365-Plugin nutzt die **Microsoft Graph REST API** mit Application Permissions (Client Credentials Flow). Folgende Einrichtung ist einmalig im Azure-Portal nötig:
+
+### 1. App Registration erstellen
+
+1. [Azure Portal](https://portal.azure.com) → **Microsoft Entra ID** → **App registrations** → **New registration**
+2. Name: z.B. `Schild Spider`
+3. Supported account types: **Single tenant** (nur diese Organisation)
+4. Redirect URI: leer lassen
+5. **Register** klicken
+
+### 2. Client Secret erzeugen
+
+1. In der neuen App → **Certificates & secrets** → **New client secret**
+2. Beschreibung und Gültigkeit wählen → **Add**
+3. **Value** sofort kopieren (wird nur einmal angezeigt!)
+
+### 3. API-Berechtigungen setzen
+
+Unter **API permissions** → **Add a permission** → **Microsoft Graph** → **Application permissions**:
+
+| Permission | Wofür |
+|---|---|
+| `User.ReadWrite.All` | Schüler-Accounts anlegen, ändern, deaktivieren |
+| `Directory.ReadWrite.All` | Gruppen + Lizenzen verwalten |
+| `GroupMember.ReadWrite.All` | Gruppen-Mitgliedschaften pflegen |
+
+Danach **Grant admin consent** klicken (erfordert Global Admin / Privileged Role Admin).
+
+### 4. IDs notieren
+
+Aus der App-Übersicht (**Overview**) benötigst du:
+- **Application (client) ID**
+- **Directory (tenant) ID**
+- Den zuvor kopierten **Client Secret Value**
+
+Diese drei Werte trägst du in Schild Spider unter **Einstellungen → Microsoft 365** ein.
+
+### 5. Optionale SKU-ID für Lizenz-Zuweisung
+
+Falls Schüler automatisch eine Lizenz erhalten sollen (z.B. A1 for Students), benötigst du die **SKU-ID**. Diese findest du über:
+- Azure Portal → **Licenses** → **All products** → Produkt anklicken → Properties → **Object ID**
+- Oder per Graph API: `GET /subscribedSkus`
+
+Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
+
+---
 
 ## Eigenes Plugin / Adapter entwickeln
 

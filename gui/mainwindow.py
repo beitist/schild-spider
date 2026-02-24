@@ -383,7 +383,9 @@ class MainWindow(QMainWindow):
         plugin_instance = plugin_class.from_config(plugin_config)
 
         thread = QThread()
-        worker = PluginApplyWorker(plugin_key, plugin_instance, filtered_cs)
+        worker = PluginApplyWorker(
+            plugin_key, plugin_instance, filtered_cs, self._settings
+        )
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)

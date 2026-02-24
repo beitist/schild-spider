@@ -59,3 +59,13 @@ class PluginBase(ABC):
     def apply_suspend(self, school_internal_ids: list[str]) -> list[dict]:
         """Deaktiviert Schüler."""
         ...
+
+    # --- Optionales Interface ---
+
+    def get_write_back_data(self) -> list[dict]:
+        """Gibt Daten zurück die an den Adapter zurückgeschrieben werden sollen.
+
+        Z.B. generierte Email-Adressen: [{"school_internal_id": "123", "email": "..."}]
+        Standard: keine Daten.
+        """
+        return []

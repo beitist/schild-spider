@@ -43,6 +43,7 @@ jobs:
           --hidden-import=plugins
           --hidden-import=plugins.base
           --hidden-import=plugins.hagen_id
+          --hidden-import=plugins.m365
           --hidden-import=gui.setup_wizard
           --collect-submodules=adapters
           --collect-submodules=plugins
