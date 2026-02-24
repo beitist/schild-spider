@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import warnings
 
 from adapters.base import AdapterBase
@@ -11,7 +12,7 @@ from core.models import (
 )
 
 # ---------------------------------------------------------------------------
-# SQL-Queries — Tabellen-/Spaltennamen gegen echtes SchILD-Schema prüfen!
+# SQL-Queries — basierend auf SchILD-NRW-Schema (MariaDB)
 # ---------------------------------------------------------------------------
 
 _SQL_STUDENTS = """
@@ -21,46 +22,62 @@ _SQL_STUDENTS = """
         s.Name              AS last_name,
         s.Geburtsdatum      AS dob,
         s.SchulEmail        AS email,
-        s.Klasse            AS class_name
+        s.Klasse            AS class_name,
+        s.AktSchuljahr      AS akt_schuljahr,
+        s.AktAbschnitt      AS akt_abschnitt
     FROM Schueler s
     WHERE s.Status = 2
     ORDER BY s.Name, s.Vorname
 """
 
+# Klassenlehrer kommen aus der Tabelle "versetzung", nicht aus "Klassen".
+# KlassenlehrerKrz / StvKlassenlehrerKrz → k_lehrer.Kuerzel
 _SQL_CLASS_TEACHERS = """
     SELECT
-        k.Klasse            AS class_name,
-        kl1.Nachname        AS teacher_1,
-        kl2.Nachname        AS teacher_2
-    FROM Klassen k
-    LEFT JOIN K_Lehrer kl1 ON k.KlassenLehrer = kl1.Kuerzel
-    LEFT JOIN K_Lehrer kl2 ON k.StvKlassenLehrer = kl2.Kuerzel
+        v.Klasse              AS class_name,
+        kl1.Nachname          AS teacher_1,
+        kl2.Nachname          AS teacher_2
+    FROM versetzung v
+    LEFT JOIN K_Lehrer kl1 ON v.KlassenlehrerKrz = kl1.Kuerzel
+    LEFT JOIN K_Lehrer kl2 ON v.StvKlassenlehrerKrz = kl2.Kuerzel
+    WHERE v.Schueler_ID = %s
 """
 
+# Leistungsdaten: schuelerlernabschnittsdaten verknüpft Schuljahr (Jahr)
+# + Halbjahr (Abschnitt). schuelerleistungsdaten hängt via Abschnitt_ID dran.
+# eigeneschule_faecher → Zeugnisbez (nicht Bezeichnung!)
 _SQL_COURSES = """
     SELECT
-        ld.Schueler_ID      AS student_id,
-        f.Bezeichnung       AS course_name,
-        kl.Nachname         AS teacher_name,
-        ld.Kurs_ID          AS course_id
+        ld.Schueler_ID        AS student_id,
+        f.Zeugnisbez          AS course_name,
+        kl.Nachname           AS teacher_name,
+        ld.Kurs_ID            AS course_id
     FROM SchuelerLeistungsdaten ld
     LEFT JOIN EigeneSchule_Faecher f ON ld.Fach_ID = f.ID
     LEFT JOIN K_Lehrer kl ON ld.FachLehrer = kl.Kuerzel
     WHERE ld.Abschnitt_ID IN (
-        SELECT ID FROM SchuelerLernabschnittsdaten
-        WHERE Jahr = YEAR(CURDATE()) AND Abschnitt = 1
+        SELECT la.ID FROM SchuelerLernabschnittsdaten la
+        WHERE la.Jahr = %s AND la.Abschnitt = %s
     )
 """
 
 _SQL_TEACHERS = """
     SELECT
-        kl.Vorname          AS first_name,
-        kl.Nachname         AS last_name,
-        kl.Geburtsdatum     AS dob,
-        kl.Amtsbezeichnung  AS job_title
+        kl.Vorname            AS first_name,
+        kl.Nachname           AS last_name,
+        kl.Geburtsdatum       AS dob,
+        kl.Amtsbezeichnung    AS job_title
     FROM K_Lehrer kl
     WHERE kl.Sichtbar = '+'
     ORDER BY kl.Nachname, kl.Vorname
+"""
+
+_SQL_PHOTOS = """
+    SELECT
+        sf.Schueler_ID        AS student_id,
+        sf.Foto               AS photo_blob
+    FROM SchuelerFotos sf
+    WHERE sf.Schueler_ID IN ({placeholders})
 """
 
 _SQL_WRITE_BACK_EMAIL = """
@@ -80,12 +97,16 @@ class SchildDbAdapter(AdapterBase):
         db_name: str,
         db_user: str,
         db_password: str,
+        schuljahr: str,
+        abschnitt: str,
     ) -> None:
         self.db_host = db_host
         self.db_port = db_port or "3306"
         self.db_name = db_name
         self.db_user = db_user
         self.db_password = db_password
+        self.schuljahr = schuljahr
+        self.abschnitt = abschnitt or "1"
 
     # --- Metadaten ---
 
@@ -122,6 +143,17 @@ class SchildDbAdapter(AdapterBase):
                 label="Passwort",
                 field_type="password",
             ),
+            ConfigField(
+                key="schuljahr",
+                label="Schuljahr",
+                placeholder="2025",
+            ),
+            ConfigField(
+                key="abschnitt",
+                label="Halbjahr (Abschnitt)",
+                placeholder="1",
+                default="1",
+            ),
         ]
 
     @classmethod
@@ -132,6 +164,8 @@ class SchildDbAdapter(AdapterBase):
             db_name=config.get("db_name", ""),
             db_user=config.get("db_user", ""),
             db_password=config.get("db_password", ""),
+            schuljahr=config.get("schuljahr", ""),
+            abschnitt=config.get("abschnitt", "1"),
         )
 
     # --- Verbindung ---
@@ -179,16 +213,20 @@ class SchildDbAdapter(AdapterBase):
         columns = [col[0] for col in cursor.description]
         raw_students = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # 2. Klassenlehrer laden
-        cursor.execute(_SQL_CLASS_TEACHERS)
-        ct_cols = [col[0] for col in cursor.description]
-        class_teachers: dict[str, dict] = {}
-        for row in cursor.fetchall():
-            ct = dict(zip(ct_cols, row))
-            class_teachers[ct["class_name"]] = ct
+        # 2. Klassenlehrer pro Schüler laden (via versetzung-Tabelle)
+        class_teachers_by_sid: dict[str, dict] = {}
+        for raw in raw_students:
+            sid = str(raw.get("school_internal_id", "")).strip()
+            if not sid:
+                continue
+            cursor.execute(_SQL_CLASS_TEACHERS, (sid,))
+            ct_cols = [col[0] for col in cursor.description]
+            row = cursor.fetchone()
+            if row:
+                class_teachers_by_sid[sid] = dict(zip(ct_cols, row))
 
-        # 3. Kurszuordnungen laden
-        cursor.execute(_SQL_COURSES)
+        # 3. Kurszuordnungen laden (parametrisiert mit Schuljahr + Abschnitt)
+        cursor.execute(_SQL_COURSES, (self.schuljahr, self.abschnitt))
         course_cols = [col[0] for col in cursor.description]
         courses_by_student: dict[str, list[CourseAssignment]] = {}
         for row in cursor.fetchall():
@@ -201,9 +239,17 @@ class SchildDbAdapter(AdapterBase):
             )
             courses_by_student.setdefault(sid, []).append(assignment)
 
+        # 4. Fotos laden
+        student_ids = [
+            str(raw.get("school_internal_id", "")).strip()
+            for raw in raw_students
+            if str(raw.get("school_internal_id", "")).strip()
+        ]
+        photos_by_sid = self._load_photos(cursor, student_ids)
+
         conn.close()
 
-        # 4. Zusammenbauen
+        # 5. Zusammenbauen
         students: list[StudentRecord] = []
         skipped = 0
 
@@ -213,7 +259,7 @@ class SchildDbAdapter(AdapterBase):
                 skipped += 1
                 continue
 
-            ct = class_teachers.get(raw.get("class_name", ""), {})
+            ct = class_teachers_by_sid.get(sid, {})
             dob = self._format_date(raw.get("dob"))
 
             students.append(
@@ -224,6 +270,7 @@ class SchildDbAdapter(AdapterBase):
                     dob=dob,
                     email=(raw.get("email") or "").strip(),
                     class_name=(raw.get("class_name") or "").strip(),
+                    photo_path=photos_by_sid.get(sid),
                     class_teacher_1=(ct.get("teacher_1") or "").strip(),
                     class_teacher_2=(ct.get("teacher_2") or "").strip(),
                     courses=courses_by_student.get(sid, []),
@@ -298,15 +345,51 @@ class SchildDbAdapter(AdapterBase):
     # --- Hilfsmethoden ---
 
     @staticmethod
+    def _load_photos(cursor, student_ids: list[str]) -> dict[str, str]:
+        """Lädt Fotos aus schuelerfotos und speichert als temp-Dateien.
+
+        Gibt ein Dict {student_id: temp_file_path} zurück.
+        """
+        if not student_ids:
+            return {}
+
+        placeholders = ",".join(["%s"] * len(student_ids))
+        sql = _SQL_PHOTOS.replace("{placeholders}", placeholders)
+        cursor.execute(sql, student_ids)
+
+        photos: dict[str, str] = {}
+        photo_cols = [col[0] for col in cursor.description]
+        for row in cursor.fetchall():
+            p = dict(zip(photo_cols, row))
+            sid = str(p["student_id"])
+            blob = p.get("photo_blob")
+            if not blob:
+                continue
+            # MEDIUMBLOB als temporäre Datei speichern
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".jpg", prefix=f"schild_photo_{sid}_", delete=False
+            )
+            tmp.write(blob)
+            tmp.close()
+            photos[sid] = tmp.name
+
+        return photos
+
+    @staticmethod
     def _format_date(value) -> str:
-        """Konvertiert DB-Datumswert nach ISO-String (YYYY-MM-DD)."""
+        """Konvertiert DB-Datumswert (DATETIME) nach ISO-String (YYYY-MM-DD)."""
         if value is None:
             return ""
+        # pyodbc gibt datetime.datetime oder datetime.date zurück
         if hasattr(value, "strftime"):
             return value.strftime("%Y-%m-%d")
         s = str(value).strip()
+        # Fallback: "DD.MM.YYYY" → "YYYY-MM-DD"
         if "." in s:
             parts = s.split(".")
             if len(parts) == 3:
                 return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        # Fallback: "YYYY-MM-DD HH:MM:SS" → "YYYY-MM-DD"
+        if " " in s:
+            return s.split(" ")[0]
         return s
