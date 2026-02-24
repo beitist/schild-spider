@@ -91,6 +91,7 @@ class GraphClient:
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
+                    "ConsistencyLevel": "eventual",
                 },
                 timeout=30,
             )

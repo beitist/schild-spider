@@ -26,12 +26,14 @@ class M365Plugin(PluginBase):
         license_sku_id: str,
         group_prefix: str,
         usage_location: str,
+        display_name_template: str = "",
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
         self._license_sku_id = license_sku_id
         self._group_prefix = group_prefix or "Klasse"
         self._usage_location = usage_location or "DE"
+        self._display_name_template = display_name_template or "{k} {n}, {v}"
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
@@ -91,6 +93,12 @@ class M365Plugin(PluginBase):
                 placeholder="DE",
                 default="DE",
             ),
+            ConfigField(
+                key="display_name_template",
+                label="Anzeigename ({k}=Klasse, {n}=Nachname, {v}=Vorname)",
+                placeholder="{k} {n}, {v}",
+                default="{k} {n}, {v}",
+            ),
         ]
 
     @classmethod
@@ -104,6 +112,7 @@ class M365Plugin(PluginBase):
             license_sku_id=config.get("license_sku_id", ""),
             group_prefix=config.get("group_prefix", "Klasse"),
             usage_location=config.get("usage_location", "DE"),
+            display_name_template=config.get("display_name_template", "{k} {n}, {v}"),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -123,6 +132,18 @@ class M365Plugin(PluginBase):
             return False, f"Graph API Fehler: {exc}"
         except Exception as exc:
             return False, f"Verbindungsfehler: {exc}"
+
+    def _format_display_name(self, student: dict) -> str:
+        """Formatiert den Anzeigenamen nach dem konfigurierten Template."""
+        v = student.get("first_name", "")
+        n = student.get("last_name", "")
+        k = student.get("class_name", "")
+        return (
+            self._display_name_template.replace("{v}", v)
+            .replace("{n}", n)
+            .replace("{k}", k)
+            .strip()
+        )
 
     # --- Sync-Interface ---
 
@@ -202,7 +223,7 @@ class M365Plugin(PluginBase):
 
                 user_data = {
                     "accountEnabled": True,
-                    "displayName": f"{student.get('first_name', '')} {student.get('last_name', '')}".strip(),
+                    "displayName": self._format_display_name(student),
                     "givenName": student.get("first_name", ""),
                     "surname": student.get("last_name", ""),
                     "userPrincipalName": email,
@@ -286,9 +307,7 @@ class M365Plugin(PluginBase):
                     updates["mailNickname"] = email.split("@")[0]
 
                 if updates:
-                    display = f"{student.get('first_name', '')} {student.get('last_name', '')}".strip()
-                    if display:
-                        updates["displayName"] = display
+                    updates["displayName"] = self._format_display_name(student)
                     self._graph.update_user(user_id, updates)
 
                 # Gruppenwechsel bei Klassenwechsel
