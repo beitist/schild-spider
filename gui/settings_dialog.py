@@ -55,6 +55,13 @@ class SettingsDialog(QDialog):
         self._txt_school = QLineEdit(self._settings.get("school_name", ""))
         general_form.addRow("Schulname:", self._txt_school)
 
+        self._txt_class_filter = QLineEdit(self._settings.get("debug_class_filter", ""))
+        self._txt_class_filter.setPlaceholderText(
+            "leer = alle Klassen (z.B. 'test' zum Testen)"
+        )
+        self._txt_class_filter.setMinimumHeight(28)
+        general_form.addRow("Klassenfilter:", self._txt_class_filter)
+
         root.addWidget(general_group)
 
         # --- Datenquelle (Adapter) ---
@@ -182,6 +189,7 @@ class SettingsDialog(QDialog):
 
     def _on_save(self) -> None:
         self._settings["school_name"] = self._txt_school.text().strip()
+        self._settings["debug_class_filter"] = self._txt_class_filter.text().strip()
 
         # Adapter
         adapter_key = self._cmb_adapter.currentData()

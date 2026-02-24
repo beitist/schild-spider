@@ -32,6 +32,20 @@ class LoadWorker(QObject):
                 students = adapter.load()
                 self.log.emit(f"{len(students)} Schüler geladen.")
 
+                # Debug-Klassenfilter
+                class_filter = (
+                    (self.settings.get("debug_class_filter", "") or "").strip().lower()
+                )
+                if class_filter:
+                    before = len(students)
+                    students = [
+                        s for s in students if class_filter in s.class_name.lower()
+                    ]
+                    self.log.emit(
+                        f"\u26a0 FILTER aktiv: '{class_filter}' "
+                        f"\u2192 {len(students)} von {before} Sch\u00fclern"
+                    )
+
                 teachers = adapter.load_teachers()
                 if teachers:
                     self.log.emit(f"{len(teachers)} Lehrer geladen.")
