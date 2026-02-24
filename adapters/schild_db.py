@@ -25,12 +25,13 @@ _SQL_STUDENTS = """
         s.Klasse            AS class_name,
         s.AktSchuljahr      AS akt_schuljahr,
         s.AktAbschnitt      AS akt_abschnitt
-    FROM Schueler s
+    FROM schueler s
     WHERE s.Status = 2
     ORDER BY s.Name, s.Vorname
 """
 
-# Klassenlehrer kommen aus der Tabelle "versetzung", nicht aus "Klassen".
+# Klassenlehrer kommen aus der Tabelle "versetzung" (Klassen-Tabelle).
+# Eine Zeile pro Klasse, NICHT pro Schüler.
 # KlassenlehrerKrz / StvKlassenlehrerKrz → k_lehrer.Kuerzel
 _SQL_CLASS_TEACHERS = """
     SELECT
@@ -38,9 +39,8 @@ _SQL_CLASS_TEACHERS = """
         kl1.Nachname          AS teacher_1,
         kl2.Nachname          AS teacher_2
     FROM versetzung v
-    LEFT JOIN K_Lehrer kl1 ON v.KlassenlehrerKrz = kl1.Kuerzel
-    LEFT JOIN K_Lehrer kl2 ON v.StvKlassenlehrerKrz = kl2.Kuerzel
-    WHERE v.Schueler_ID = %s
+    LEFT JOIN k_lehrer kl1 ON v.KlassenlehrerKrz = kl1.Kuerzel
+    LEFT JOIN k_lehrer kl2 ON v.StvKlassenlehrerKrz = kl2.Kuerzel
 """
 
 # Leistungsdaten: schuelerlernabschnittsdaten verknüpft Schuljahr (Jahr)
@@ -52,11 +52,11 @@ _SQL_COURSES = """
         f.Zeugnisbez          AS course_name,
         kl.Nachname           AS teacher_name,
         ld.Kurs_ID            AS course_id
-    FROM SchuelerLeistungsdaten ld
-    LEFT JOIN EigeneSchule_Faecher f ON ld.Fach_ID = f.ID
-    LEFT JOIN K_Lehrer kl ON ld.FachLehrer = kl.Kuerzel
+    FROM schuelerleistungsdaten ld
+    LEFT JOIN eigeneschule_faecher f ON ld.Fach_ID = f.ID
+    LEFT JOIN k_lehrer kl ON ld.FachLehrer = kl.Kuerzel
     WHERE ld.Abschnitt_ID IN (
-        SELECT la.ID FROM SchuelerLernabschnittsdaten la
+        SELECT la.ID FROM schuelerlernabschnittsdaten la
         WHERE la.Jahr = %s AND la.Abschnitt = %s
     )
 """
@@ -67,7 +67,7 @@ _SQL_TEACHERS = """
         kl.Nachname           AS last_name,
         kl.Geburtsdatum       AS dob,
         kl.Amtsbezeichnung    AS job_title
-    FROM K_Lehrer kl
+    FROM k_lehrer kl
     WHERE kl.Sichtbar = '+'
     ORDER BY kl.Nachname, kl.Vorname
 """
@@ -76,12 +76,12 @@ _SQL_PHOTOS = """
     SELECT
         sf.Schueler_ID        AS student_id,
         sf.Foto               AS photo_blob
-    FROM SchuelerFotos sf
+    FROM schuelerfotos sf
     WHERE sf.Schueler_ID IN ({placeholders})
 """
 
 _SQL_WRITE_BACK_EMAIL = """
-    UPDATE Schueler
+    UPDATE schueler
     SET SchulEmail = %s
     WHERE ID = %s
 """
@@ -193,7 +193,7 @@ class SchildDbAdapter(AdapterBase):
         try:
             conn = self._connect()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM Schueler WHERE Status = 2")
+            cursor.execute("SELECT COUNT(*) FROM schueler WHERE Status = 2")
             count = cursor.fetchone()[0]
             conn.close()
             return (True, f"Verbunden. {count} aktive Schüler gefunden.")
@@ -211,17 +211,15 @@ class SchildDbAdapter(AdapterBase):
         columns = [col[0] for col in cursor.description]
         raw_students = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        # 2. Klassenlehrer pro Schüler laden (via versetzung-Tabelle)
-        class_teachers_by_sid: dict[str, dict] = {}
-        for raw in raw_students:
-            sid = str(raw.get("school_internal_id", "")).strip()
-            if not sid:
-                continue
-            cursor.execute(_SQL_CLASS_TEACHERS, (sid,))
-            ct_cols = [col[0] for col in cursor.description]
-            row = cursor.fetchone()
-            if row:
-                class_teachers_by_sid[sid] = dict(zip(ct_cols, row))
+        # 2. Klassenlehrer pro Klasse laden (versetzung = Klassen-Tabelle)
+        cursor.execute(_SQL_CLASS_TEACHERS)
+        ct_cols = [col[0] for col in cursor.description]
+        class_teachers_by_class: dict[str, dict] = {}
+        for row in cursor.fetchall():
+            ct = dict(zip(ct_cols, row))
+            klass = (ct.get("class_name") or "").strip()
+            if klass:
+                class_teachers_by_class[klass] = ct
 
         # 3. Kurszuordnungen laden (parametrisiert mit Schuljahr + Abschnitt)
         cursor.execute(_SQL_COURSES, (self.schuljahr, self.abschnitt))
@@ -257,7 +255,8 @@ class SchildDbAdapter(AdapterBase):
                 skipped += 1
                 continue
 
-            ct = class_teachers_by_sid.get(sid, {})
+            class_name = (raw.get("class_name") or "").strip()
+            ct = class_teachers_by_class.get(class_name, {})
             dob = self._format_date(raw.get("dob"))
 
             students.append(
@@ -267,7 +266,7 @@ class SchildDbAdapter(AdapterBase):
                     last_name=(raw.get("last_name") or "").strip(),
                     dob=dob,
                     email=(raw.get("email") or "").strip(),
-                    class_name=(raw.get("class_name") or "").strip(),
+                    class_name=class_name,
                     photo_path=photos_by_sid.get(sid),
                     class_teacher_1=(ct.get("teacher_1") or "").strip(),
                     class_teacher_2=(ct.get("teacher_2") or "").strip(),
