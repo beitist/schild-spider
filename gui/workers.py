@@ -97,19 +97,18 @@ class PluginApplyWorker(QObject):
     finished = Signal(str)  # plugin_key
     error = Signal(str, str)  # (plugin_key, error_message)
     log = Signal(str)
+    write_back_ready = Signal(str, list)  # (plugin_key, write_back_data)
 
     def __init__(
         self,
         plugin_key: str,
         plugin: PluginBase,
         changeset: ChangeSet,
-        settings: dict | None = None,
     ) -> None:
         super().__init__()
         self.plugin_key = plugin_key
         self.plugin = plugin
         self.changeset = changeset
-        self.settings = settings
 
     @Slot()
     def run(self) -> None:
@@ -136,35 +135,24 @@ class PluginApplyWorker(QObject):
                 results = self.plugin.apply_suspend(cs.suspended)
                 self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
 
-            # Write-back: generierte Daten an den Adapter zurückschreiben
-            self._handle_write_back()
+            # Write-back-Daten prüfen und im Log anzeigen (NICHT automatisch schreiben)
+            write_back_data = self.plugin.get_write_back_data()
+            if write_back_data:
+                self.log.emit(f"\n--- Generierte Daten ({len(write_back_data)}) ---")
+                for item in write_back_data:
+                    name = (
+                        f"{item.get('first_name', '')} {item.get('last_name', '')}"
+                    ).strip()
+                    email = item.get("email", "")
+                    cls = item.get("class_name", "")
+                    if name and email:
+                        self.log.emit(f"  {cls}: {name} \u2192 {email}")
+                self.log.emit(
+                    "Bitte \u00fcber 'R\u00fcckschreiben' an SchILD zur\u00fcckschreiben."
+                )
+                self.write_back_ready.emit(self.plugin_key, write_back_data)
 
             self.finished.emit(self.plugin_key)
 
         except Exception as exc:
             self.error.emit(self.plugin_key, str(exc))
-
-    def _handle_write_back(self) -> None:
-        """Schreibt vom Plugin generierte Daten an den Adapter zurück."""
-        write_back_data = self.plugin.get_write_back_data()
-        if not write_back_data or not self.settings:
-            return
-
-        try:
-            adapter = load_adapter(self.settings)
-            if not adapter.supports_write_back():
-                self.log.emit(
-                    f"  {len(write_back_data)} Daten für Write-back, "
-                    "aber Adapter unterstützt kein Write-back."
-                )
-                return
-
-            self.log.emit(
-                f"  Schreibe {len(write_back_data)} generierte Werte zurück..."
-            )
-            results = adapter.write_back(write_back_data)
-            ok = sum(1 for r in results if r.get("success"))
-            fail = len(results) - ok
-            self.log.emit(f"  Write-back: {ok} OK, {fail} Fehler")
-        except Exception as exc:
-            self.log.emit(f"  Write-back Fehler: {exc}")

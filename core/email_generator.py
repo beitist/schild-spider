@@ -82,31 +82,42 @@ def generate_email(
     domain: str,
     template: str = "{v}.{n}",
     existing_emails: set[str] | None = None,
-) -> str:
+    class_name: str = "",
+) -> str | None:
     """Erzeugt eine Email-Adresse aus Vor-/Nachname + Domain.
 
     Template-Platzhalter:
-        {v} = Vorname (transliteriert, lowercase)
-        {n} = Nachname (transliteriert, lowercase)
+        {v}  = Vorname (transliteriert, lowercase)
+        {n}  = Nachname (transliteriert, lowercase)
+        {k}  = Klasse (sanitized, lowercase)
+        {v3} = Vorname, erste 3 Buchstaben
 
-    Bei Kollision mit existing_emails wird ein Zähler angehängt:
-        h.mueller@domain → h.mueller2@domain → h.mueller3@domain
+    Kollisionsauflösung:
+        1. Template wie angegeben  → 10a.mueller@domain
+        2. Template + .{v3}        → 10a.mueller.han@domain
+        3. Gibt None zurück        → manueller Eingriff nötig
+
+    Returns None wenn auch nach Vornamen-Suffix keine eindeutige Adresse
+    möglich ist (→ Plugin zeigt Hinweis für manuellen Input).
     """
     v = _sanitize(transliterate(first_name))
     n = _sanitize(transliterate(last_name))
+    k = _sanitize(transliterate(class_name))
+    v3 = v[:3] if len(v) >= 3 else v
 
-    local_part = template.replace("{v}", v).replace("{n}", n)
+    local_part = template.replace("{v}", v).replace("{n}", n).replace("{k}", k)
     email = f"{local_part}@{domain}"
 
-    if existing_emails is None or email not in existing_emails:
+    if existing_emails is None or email.lower() not in existing_emails:
         return email
 
-    counter = 2
-    while True:
-        candidate = f"{local_part}{counter}@{domain}"
-        if candidate not in existing_emails:
-            return candidate
-        counter += 1
+    # Kollision: Versuch mit Vornamens-Kürzel
+    candidate = f"{local_part}.{v3}@{domain}"
+    if candidate.lower() not in existing_emails:
+        return candidate
+
+    # Weiterhin Kollision → None (manueller Eingriff)
+    return None
 
 
 def _sanitize(text: str) -> str:

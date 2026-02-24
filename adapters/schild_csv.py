@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 from adapters.base import AdapterBase
@@ -241,6 +242,45 @@ class SchildCsvAdapter(AdapterBase):
         except (KeyError, ValueError) as exc:
             warnings.warn(f"Lehrer-CSV Zeile {row_num} übersprungen: {exc}")
             return None
+
+    # --- Write-back ---
+
+    def supports_write_back(self) -> bool:
+        return True
+
+    def write_back(self, updates: list[dict]) -> list[dict]:
+        """Schreibt generierte Emails als CSV-Liste neben die Quelldatei.
+
+        Erzeugt: <quellordner>/email_update_<timestamp>.csv
+        Format: Klasse;Vorname;Nachname;SchulEmail
+        """
+        if not updates:
+            return []
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = self.csv_path.parent / f"email_update_{timestamp}.csv"
+
+        with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(["Klasse", "Vorname", "Nachname", "SchulEmail"])
+            for update in updates:
+                writer.writerow(
+                    [
+                        update.get("class_name", ""),
+                        update.get("first_name", ""),
+                        update.get("last_name", ""),
+                        update.get("email", ""),
+                    ]
+                )
+
+        return [
+            {
+                "school_internal_id": u.get("school_internal_id", ""),
+                "success": True,
+                "message": str(out_path),
+            }
+            for u in updates
+        ]
 
     # --- Hilfsmethoden ---
 

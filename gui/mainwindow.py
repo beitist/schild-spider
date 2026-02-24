@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import ChangeSet, StudentRecord, TeacherRecord
-from core.plugin_loader import get_plugin_class, load_settings
+from core.plugin_loader import get_plugin_class, load_adapter, load_settings
 from gui.plugin_card import PluginCard, PluginCardState
 from gui.settings_dialog import SettingsDialog
 from gui.workers import LoadWorker, PluginApplyWorker, PluginComputeWorker
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self._selected_card_key: str | None = None
         self._worker: object | None = None
         self._worker_thread: QThread | None = None
+        self._pending_write_back: list[dict] = []
 
         self._build_ui()
         self._load_settings()
@@ -104,6 +105,15 @@ class MainWindow(QMainWindow):
         self._plugin_stack_layout.setContentsMargins(0, 0, 0, 0)
         scroll.setWidget(self._plugin_stack_widget)
         left_layout.addWidget(scroll, stretch=1)
+
+        # Rückschreiben-Button (hidden bis Write-back-Daten vorliegen)
+        self._btn_write_back = QPushButton("R\u00fcckschreiben")
+        self._btn_write_back.setStyleSheet(
+            "padding: 6px 14px; font-size: 13px; font-weight: bold;"
+        )
+        self._btn_write_back.clicked.connect(self._on_write_back)
+        self._btn_write_back.hide()
+        left_layout.addWidget(self._btn_write_back)
 
         main_splitter.addWidget(left)
 
@@ -222,6 +232,8 @@ class MainWindow(QMainWindow):
         self._log.clear()
         self._students.clear()
         self._teachers.clear()
+        self._pending_write_back.clear()
+        self._btn_write_back.hide()
         self._lbl_counts.setText("")
 
         # Cards zurücksetzen
@@ -278,6 +290,7 @@ class MainWindow(QMainWindow):
     # --- Plugin: Berechnen ---
 
     def _on_plugin_compute(self, plugin_key: str) -> None:
+        self._on_card_selected(plugin_key)
         if self._is_busy():
             return
         if not self._students:
@@ -346,6 +359,7 @@ class MainWindow(QMainWindow):
     # --- Plugin: Anwenden ---
 
     def _on_plugin_apply(self, plugin_key: str) -> None:
+        self._on_card_selected(plugin_key)
         if self._is_busy():
             return
 
@@ -383,13 +397,12 @@ class MainWindow(QMainWindow):
         plugin_instance = plugin_class.from_config(plugin_config)
 
         thread = QThread()
-        worker = PluginApplyWorker(
-            plugin_key, plugin_instance, filtered_cs, self._settings
-        )
+        worker = PluginApplyWorker(plugin_key, plugin_instance, filtered_cs)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
         worker.log.connect(self._log_msg)
+        worker.write_back_ready.connect(self._on_write_back_ready)
         worker.error.connect(self._on_plugin_worker_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(lambda k, m: thread.quit())
@@ -584,6 +597,75 @@ class MainWindow(QMainWindow):
                     excluded.add(sid)
 
         card.excluded_ids = excluded
+
+    # --- Write-back ---
+
+    def _on_write_back_ready(self, plugin_key: str, data: list) -> None:
+        """Empfängt Write-back-Daten vom Apply-Worker und speichert sie."""
+        self._pending_write_back.extend(data)
+        count = len(self._pending_write_back)
+        self._btn_write_back.setText(f"R\u00fcckschreiben ({count})")
+        self._btn_write_back.show()
+
+    def _on_write_back(self) -> None:
+        """Schreibt die gesammelten Daten \u00fcber den Adapter zur\u00fcck."""
+        if not self._pending_write_back:
+            return
+
+        try:
+            adapter = load_adapter(self._settings)
+            if not adapter.supports_write_back():
+                self._log_msg(
+                    "Adapter unterst\u00fctzt kein Write-back. "
+                    "Daten im Log oben manuell \u00fcbertragen."
+                )
+                return
+
+            count = len(self._pending_write_back)
+            self._log_msg(f"\nSchreibe {count} generierte Werte zur\u00fcck...")
+            results = adapter.write_back(self._pending_write_back)
+            ok = sum(1 for r in results if r.get("success"))
+            fail = len(results) - ok
+            self._log_msg(f"Write-back: {ok} OK, {fail} Fehler")
+
+            # Dateipfad anzeigen (CSV-Adapter gibt Pfad in message zur\u00fcck)
+            for r in results:
+                msg = r.get("message", "")
+                if msg and r.get("success") and ("/" in msg or "\\" in msg):
+                    self._log_msg(f"Exportiert nach: {msg}")
+                    break
+
+            self._pending_write_back.clear()
+            self._btn_write_back.hide()
+
+        except Exception as exc:
+            self._log_msg(f"Write-back Fehler: {exc}")
+            QMessageBox.critical(self, "Write-back Fehler", str(exc))
+
+    # --- Close-Event ---
+
+    def closeEvent(self, event) -> None:
+        """Warnt bei ausstehenden Write-back-Daten."""
+        if self._pending_write_back:
+            reply = QMessageBox.warning(
+                self,
+                "Nicht zur\u00fcckgeschriebene Daten",
+                f"Es liegen {len(self._pending_write_back)} generierte Werte "
+                f"vor, die noch nicht zur\u00fcckgeschrieben wurden.\n\n"
+                f"Jetzt r\u00fcckschreiben?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._on_write_back()
+                event.accept()
+            elif reply == QMessageBox.StandardButton.Discard:
+                event.accept()
+            else:
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     # --- Helpers ---
 

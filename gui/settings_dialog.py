@@ -242,6 +242,7 @@ class _ConfigPage(QWidget):
         for field in schema:
             txt = QLineEdit(self._config.get(field.key, field.default))
             txt.setPlaceholderText(field.placeholder)
+            txt.setMinimumHeight(28)
 
             if field.field_type in ("dir", "path"):
                 row = QHBoxLayout()

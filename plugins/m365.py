@@ -28,7 +28,7 @@ class M365Plugin(PluginBase):
         usage_location: str,
     ) -> None:
         self._domain = domain
-        self._email_template = email_template or "{v}.{n}"
+        self._email_template = email_template or "{k}.{n}"
         self._license_sku_id = license_sku_id
         self._group_prefix = group_prefix or "Klasse"
         self._usage_location = usage_location or "DE"
@@ -69,9 +69,9 @@ class M365Plugin(PluginBase):
             ),
             ConfigField(
                 key="email_template",
-                label="Email-Template ({v}=Vorname, {n}=Nachname)",
-                placeholder="{v}.{n}",
-                default="{v}.{n}",
+                label="Email-Template ({k}=Klasse, {n}=Nachname, {v}=Vorname)",
+                placeholder="{k}.{n}",
+                default="{k}.{n}",
             ),
             ConfigField(
                 key="license_sku_id",
@@ -100,7 +100,7 @@ class M365Plugin(PluginBase):
             client_id=config.get("client_id", ""),
             client_secret=config.get("client_secret", ""),
             domain=config.get("domain", ""),
-            email_template=config.get("email_template", "{v}.{n}"),
+            email_template=config.get("email_template", "{k}.{n}"),
             license_sku_id=config.get("license_sku_id", ""),
             group_prefix=config.get("group_prefix", "Klasse"),
             usage_location=config.get("usage_location", "DE"),
@@ -177,9 +177,25 @@ class M365Plugin(PluginBase):
                         self._domain,
                         self._email_template,
                         existing_emails,
+                        class_name=student.get("class_name", ""),
                     )
+                    if email is None:
+                        results.append(
+                            {
+                                "school_internal_id": sid,
+                                "success": False,
+                                "message": "Email-Kollision: manuell vergeben",
+                            }
+                        )
+                        continue
                     self._generated_emails.append(
-                        {"school_internal_id": sid, "email": email}
+                        {
+                            "school_internal_id": sid,
+                            "email": email,
+                            "first_name": student.get("first_name", ""),
+                            "last_name": student.get("last_name", ""),
+                            "class_name": student.get("class_name", ""),
+                        }
                     )
 
                 existing_emails.add(email.lower())
