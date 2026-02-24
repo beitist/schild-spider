@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -23,6 +25,23 @@ from core.plugin_loader import get_plugin_class, load_adapter, load_settings
 from gui.plugin_card import PluginCard, PluginCardState
 from gui.settings_dialog import SettingsDialog
 from gui.workers import LoadWorker, PluginApplyWorker, PluginComputeWorker
+
+
+# ---------------------------------------------------------------------------
+# Log-Handler → GUI
+# ---------------------------------------------------------------------------
+
+
+class _QtLogHandler(logging.Handler):
+    """Leitet Python-Log-Einträge an ein QTextEdit weiter."""
+
+    def __init__(self, callback) -> None:
+        super().__init__()
+        self._callback = callback
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = self.format(record)
+        self._callback(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +159,12 @@ class MainWindow(QMainWindow):
         self._log.setReadOnly(True)
         self._log.setStyleSheet("font-family: monospace; font-size: 12px;")
         right_splitter.addWidget(self._log)
+
+        # Python-Logging → GUI-Log weiterleiten
+        self._log_handler = _QtLogHandler(self._log_msg)
+        self._log_handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+        self._log_handler.setLevel(logging.DEBUG)
+        logging.getLogger("core").addHandler(self._log_handler)
 
         right_splitter.setSizes([400, 200])
         main_splitter.addWidget(right_splitter)

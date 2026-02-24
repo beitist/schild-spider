@@ -1,5 +1,6 @@
 """Schild Spider — Startpunkt der Anwendung."""
 
+import logging
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
 APP_NAME = "Schild Spider"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
 
@@ -74,6 +75,12 @@ def _build_splash_pixmap() -> QPixmap | None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("SchildSpider")

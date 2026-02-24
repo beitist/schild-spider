@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -38,7 +39,7 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Einstellungen")
-        self.setMinimumSize(720, 520)
+        self.setMinimumSize(780, 620)
 
         self._settings = settings
         self._plugin_pages: dict[str, _ConfigPage] = {}
@@ -95,8 +96,12 @@ class SettingsDialog(QDialog):
         self._plugin_list.currentRowChanged.connect(self._on_plugin_selected)
         splitter.addWidget(self._plugin_list)
 
+        # ScrollArea um den Stack, damit viele Felder nicht gestaucht werden
+        self._plugin_scroll = QScrollArea()
+        self._plugin_scroll.setWidgetResizable(True)
         self._plugin_stack = QStackedWidget()
-        splitter.addWidget(self._plugin_stack)
+        self._plugin_scroll.setWidget(self._plugin_stack)
+        splitter.addWidget(self._plugin_scroll)
 
         splitter.setSizes([180, 500])
 
@@ -245,12 +250,14 @@ class _ConfigPage(QWidget):
 
         # Dynamisches Formular aus config_schema
         form = QFormLayout()
+        form.setVerticalSpacing(10)
+        form.setContentsMargins(4, 8, 4, 8)
         schema: list[ConfigField] = self._config_class.config_schema()
 
         for field in schema:
             txt = QLineEdit(self._config.get(field.key, field.default))
             txt.setPlaceholderText(field.placeholder)
-            txt.setMinimumHeight(28)
+            txt.setMinimumHeight(32)
 
             if field.field_type in ("dir", "path"):
                 row = QHBoxLayout()

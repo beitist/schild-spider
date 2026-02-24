@@ -157,7 +157,6 @@ class M365Plugin(PluginBase):
             student_dict = {
                 "first_name": u.get("givenName", ""),
                 "last_name": u.get("surname", ""),
-                "dob": (u.get("birthday") or "")[:10],
                 "class_name": u.get("department", ""),
                 "email": u.get("userPrincipalName", ""),
             }
@@ -236,10 +235,6 @@ class M365Plugin(PluginBase):
                         "forceChangePasswordNextSignIn": True,
                     },
                 }
-
-                birthday = student.get("dob", "")
-                if birthday:
-                    user_data["birthday"] = birthday
 
                 created = self._graph.create_user(user_data)
                 user_id = created["id"]

@@ -119,21 +119,21 @@ Das M365-Plugin nutzt die **Microsoft Graph REST API** mit Application Permissio
 
 ### 1. App Registration erstellen
 
-1. [Azure Portal](https://portal.azure.com) → **Microsoft Entra ID** → **App registrations** → **New registration**
+1. [Azure Portal](https://portal.azure.com) → **Microsoft Entra ID** → **App-Registrierungen** → **Neue Registrierung**
 2. Name: z.B. `Schild Spider`
-3. Supported account types: **Single tenant** (nur diese Organisation)
-4. Redirect URI: leer lassen
-5. **Register** klicken
+3. **Unterstützte Kontotypen**: **Nur dieses Organisationsverzeichnis**
+4. **Umleitungs-URI**: leer lassen
+5. **Registrieren** klicken
 
 ### 2. Client Secret erzeugen
 
-1. In der neuen App → **Certificates & secrets** → **New client secret**
-2. Beschreibung und Gültigkeit wählen → **Add**
-3. **Value** sofort kopieren (wird nur einmal angezeigt!)
+1. In der neuen App → **Zertifikate und geheime Schlüssel** → **Neuer geheimer Clientschlüssel**
+2. Beschreibung und Gültigkeit wählen → **Hinzufügen**
+3. **Wert** sofort kopieren (wird nur einmal angezeigt!)
 
 ### 3. API-Berechtigungen setzen
 
-Unter **API permissions** → **Add a permission** → **Microsoft Graph** → **Application permissions**:
+Unter **API-Berechtigungen** → **Eine Berechtigung hinzufügen** → **Microsoft Graph** → **Anwendungsberechtigungen**:
 
 | Permission | Wofür |
 |---|---|
@@ -141,14 +141,14 @@ Unter **API permissions** → **Add a permission** → **Microsoft Graph** → *
 | `Directory.ReadWrite.All` | Gruppen + Lizenzen verwalten |
 | `GroupMember.ReadWrite.All` | Gruppen-Mitgliedschaften pflegen |
 
-Danach **Grant admin consent** klicken (erfordert Global Admin / Privileged Role Admin).
+Danach **Zustimmung des Administrators erteilen** klicken (erfordert Global Admin / Privileged Role Admin).
 
 ### 4. IDs notieren
 
 Aus der App-Übersicht (**Overview**) benötigst du:
-- **Application (client) ID**
-- **Directory (tenant) ID**
-- Den zuvor kopierten **Client Secret Value**
+- **Anwendungs- (Client) ID**
+- **Verzeichnis- (Mandant) ID**
+- Den zuvor kopierten **geheimen Clientschlüssel**
 
 Diese drei Werte trägst du in Schild Spider unter **Einstellungen → Microsoft 365** ein.
 

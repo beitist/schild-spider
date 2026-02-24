@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import requests
+
+log = logging.getLogger(__name__)
 
 _TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -42,8 +45,10 @@ class GraphClient:
         if self._token and time.time() < self._token_expires - 60:
             return self._token
 
+        token_url = _TOKEN_URL.format(tenant_id=self._tenant_id)
+        log.debug("Token-Request: POST %s", token_url)
         resp = requests.post(
-            _TOKEN_URL.format(tenant_id=self._tenant_id),
+            token_url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self._client_id,
@@ -52,6 +57,7 @@ class GraphClient:
             },
             timeout=15,
         )
+        log.debug("Token-Response: %s", resp.status_code)
         if resp.status_code != 200:
             body = (
                 resp.json()
@@ -80,6 +86,7 @@ class GraphClient:
     ) -> dict:
         """Sendet einen Request an die Graph API mit Auth + Retry."""
         url = f"{_GRAPH_BASE}{path}" if path.startswith("/") else path
+        log.debug("%s %s params=%s", method, url, params)
 
         for attempt in range(_MAX_RETRIES):
             token = self._get_token()
@@ -96,8 +103,11 @@ class GraphClient:
                 timeout=30,
             )
 
+            log.debug("Response: %s %s", resp.status_code, method)
+
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", _DEFAULT_RETRY_AFTER))
+                log.warning("Throttled (429), retry nach %ds", retry_after)
                 time.sleep(retry_after)
                 continue
 
@@ -111,11 +121,17 @@ class GraphClient:
                 except Exception:
                     pass
                 error = body.get("error", {})
-                raise GraphApiError(
+                msg = error.get("message", "") or resp.text
+                code = error.get("code", "")
+                log.error(
+                    "Graph API Fehler: %s %s → %s [%s] %s",
+                    method,
+                    url,
                     resp.status_code,
-                    error.get("message", resp.text),
-                    error.get("code", ""),
+                    code,
+                    msg,
                 )
+                raise GraphApiError(resp.status_code, msg, code)
 
             if not resp.content:
                 return {}
@@ -138,20 +154,29 @@ class GraphClient:
     # --- User-Operationen ---
 
     _USER_SELECT = (
-        "id,employeeId,givenName,surname,birthday,department,"
+        "id,employeeId,givenName,surname,department,"
         "userPrincipalName,accountEnabled,mail,displayName"
     )
 
     def list_users(self, domain: str) -> list[dict]:
-        """Listet alle User einer Domain auf."""
-        return self._request_paged(
+        """Listet alle User einer Domain auf (client-seitig gefiltert)."""
+        domain_suffix = f"@{domain}".lower()
+        all_users = self._request_paged(
             "/users",
-            params={
-                "$filter": f"endsWith(userPrincipalName,'@{domain}')",
-                "$select": self._USER_SELECT,
-                "$count": "true",
-            },
+            params={"$select": self._USER_SELECT},
         )
+        filtered = [
+            u
+            for u in all_users
+            if u.get("userPrincipalName", "").lower().endswith(domain_suffix)
+        ]
+        log.debug(
+            "list_users: %d von %d mit Domain @%s",
+            len(filtered),
+            len(all_users),
+            domain,
+        )
+        return filtered
 
     def create_user(self, user_data: dict) -> dict:
         """Legt einen neuen User an."""
@@ -204,14 +229,17 @@ class GraphClient:
     # --- Gruppen ---
 
     def list_groups(self, prefix: str) -> list[dict]:
-        """Listet Gruppen die mit prefix beginnen."""
-        return self._request_paged(
+        """Listet Gruppen die mit prefix beginnen (client-seitig gefiltert)."""
+        all_groups = self._request_paged(
             "/groups",
-            params={
-                "$filter": f"startsWith(displayName,'{prefix}')",
-                "$select": "id,displayName,mailNickname,mail",
-            },
+            params={"$select": "id,displayName,mailNickname,mail"},
         )
+        prefix_lower = prefix.lower()
+        return [
+            g
+            for g in all_groups
+            if g.get("displayName", "").lower().startswith(prefix_lower)
+        ]
 
     def create_group(self, group_data: dict) -> dict:
         """Erstellt eine neue Gruppe."""
