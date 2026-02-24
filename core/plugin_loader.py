@@ -86,7 +86,7 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 
 # Wird bei jeder strukturellen Änderung am Settings-Schema hochgezählt.
 # load_settings() prüft dies und migriert automatisch.
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 
 
 def generate_default_settings(
@@ -145,6 +145,10 @@ def migrate_settings(old_settings: dict) -> dict:
         school_name=old_settings.get("school_name", ""),
         adapter_type=old_settings.get("adapter", {}).get("type", "schild_csv"),
     )
+
+    # Top-Level-Felder übernehmen
+    if "debug_class_filter" in old_settings:
+        new_settings["debug_class_filter"] = old_settings["debug_class_filter"]
 
     # Adapter-Config übernehmen (nur Felder die im neuen Schema existieren)
     old_adapter = old_settings.get("adapter", {})

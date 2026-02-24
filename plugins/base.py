@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.models import ConfigField
+from core.models import ChangeSet, ConfigField
 
 
 class PluginBase(ABC):
@@ -61,6 +61,9 @@ class PluginBase(ABC):
         ...
 
     # --- Optionales Interface ---
+
+    def enrich_preview(self, changeset: ChangeSet) -> None:
+        """Reichert das ChangeSet mit Preview-Daten an (z.B. generierte Emails)."""
 
     def get_write_back_data(self) -> list[dict]:
         """Gibt Daten zurück die an den Adapter zurückgeschrieben werden sollen.

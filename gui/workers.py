@@ -96,6 +96,9 @@ class PluginComputeWorker(QObject):
                     f"{len(cs.photo_updates)} Foto-Updates"
                 )
 
+                # Vorschau-Daten anreichern (z.B. Emails vorgenerieren)
+                self.plugin.enrich_preview(cs)
+
                 for w in caught:
                     self.log.emit(f"⚠ {w.message}")
 

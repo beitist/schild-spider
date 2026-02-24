@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import string
 import warnings
 
 from core.email_generator import generate_email
 from core.graph_client import GraphApiError, GraphClient
-from core.models import ConfigField
+from core.models import ChangeSet, ConfigField
 from plugins.base import PluginBase
 
 
@@ -24,21 +25,27 @@ class M365Plugin(PluginBase):
         domain: str,
         email_template: str,
         license_sku_id: str,
-        group_prefix: str,
+        group_sus_template: str,
+        group_kuk_template: str,
         usage_location: str,
         display_name_template: str = "",
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
         self._license_sku_id = license_sku_id
-        self._group_prefix = group_prefix or "Klasse"
+        self._group_sus_template = group_sus_template or "{k}_sus"
+        self._group_kuk_template = group_kuk_template or "{k}_kuk"
         self._usage_location = usage_location or "DE"
         self._display_name_template = display_name_template or "{k} {n}, {v}"
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
-        self._group_cache: dict[str, str] = {}  # class_name → group_id
+        self._sus_cache: dict[str, str] = {}  # class_name → group_id
+        self._kuk_cache: dict[str, str] = {}  # class_name → group_id
+        self._kuk_processed: set[str] = set()  # Klassen, deren KuK schon bearbeitet
         self._generated_emails: list[dict] = []  # für Write-back
+        self._existing_emails: set[str] = set()  # gecached aus get_manifest
+        self._all_users: list[dict] | None = None  # gecached für Lehrer-Suche
 
     # --- Metadaten ---
 
@@ -82,10 +89,16 @@ class M365Plugin(PluginBase):
                 default="",
             ),
             ConfigField(
-                key="group_prefix",
-                label="Gruppen-Präfix",
-                placeholder="Klasse",
-                default="Klasse",
+                key="group_sus_template",
+                label="Gruppen-Mail SuS ({k}=Klasse)",
+                placeholder="{k}_sus",
+                default="{k}_sus",
+            ),
+            ConfigField(
+                key="group_kuk_template",
+                label="Gruppen-Mail KuK ({k}=Klasse)",
+                placeholder="{k}_kuk",
+                default="{k}_kuk",
             ),
             ConfigField(
                 key="usage_location",
@@ -110,7 +123,8 @@ class M365Plugin(PluginBase):
             domain=config.get("domain", ""),
             email_template=config.get("email_template", "{k}.{n}"),
             license_sku_id=config.get("license_sku_id", ""),
-            group_prefix=config.get("group_prefix", "Klasse"),
+            group_sus_template=config.get("group_sus_template", "{k}_sus"),
+            group_kuk_template=config.get("group_kuk_template", "{k}_kuk"),
             usage_location=config.get("usage_location", "DE"),
             display_name_template=config.get("display_name_template", "{k} {n}, {v}"),
         )
@@ -149,6 +163,10 @@ class M365Plugin(PluginBase):
 
     def get_manifest(self) -> list[dict]:
         users = self._graph.list_users(self._domain)
+        # Email-Cache für enrich_preview und apply_new
+        self._existing_emails = {u.get("userPrincipalName", "").lower() for u in users}
+        self._all_users = users
+
         manifest: list[dict] = []
         for u in users:
             eid = u.get("employeeId")
@@ -181,9 +199,27 @@ class M365Plugin(PluginBase):
         )
         return hashlib.sha256(parts.encode()).hexdigest()
 
+    def enrich_preview(self, changeset: ChangeSet) -> None:
+        """Generiert Emails für neue Schüler, damit sie in der Vorschau sichtbar sind."""
+        preview_emails = set(self._existing_emails)
+        for student in changeset.new:
+            email = (student.get("email") or "").strip()
+            if not email:
+                email = generate_email(
+                    student.get("first_name", ""),
+                    student.get("last_name", ""),
+                    self._domain,
+                    self._email_template,
+                    preview_emails,
+                    class_name=student.get("class_name", ""),
+                )
+                if email:
+                    student["email"] = email
+                    preview_emails.add(email.lower())
+
     def apply_new(self, students: list[dict]) -> list[dict]:
         self._generated_emails = []
-        existing_emails = self._collect_existing_emails()
+        existing_emails = set(self._existing_emails) or self._collect_existing_emails()
         results: list[dict] = []
 
         for student in students:
@@ -208,15 +244,17 @@ class M365Plugin(PluginBase):
                             }
                         )
                         continue
-                    self._generated_emails.append(
-                        {
-                            "school_internal_id": sid,
-                            "email": email,
-                            "first_name": student.get("first_name", ""),
-                            "last_name": student.get("last_name", ""),
-                            "class_name": student.get("class_name", ""),
-                        }
-                    )
+
+                # Generierte Email für Write-back merken
+                self._generated_emails.append(
+                    {
+                        "school_internal_id": sid,
+                        "email": email,
+                        "first_name": student.get("first_name", ""),
+                        "last_name": student.get("last_name", ""),
+                        "class_name": student.get("class_name", ""),
+                    }
+                )
 
                 existing_emails.add(email.lower())
 
@@ -364,23 +402,26 @@ class M365Plugin(PluginBase):
 
     # --- Gruppen-Hilfsmethoden ---
 
-    def _ensure_class_group(self, class_name: str) -> str | None:
-        """Findet oder erstellt die M365-Gruppe für eine Klasse."""
+    def _ensure_group(
+        self, class_name: str, template: str, cache: dict[str, str]
+    ) -> str | None:
+        """Findet oder erstellt eine M365-Gruppe anhand des Templates."""
         if not class_name:
             return None
 
-        if class_name in self._group_cache:
-            return self._group_cache[class_name]
+        cache_key = f"{template}|{class_name}"
+        if cache_key in cache:
+            return cache[cache_key]
 
-        display_name = f"{self._group_prefix} {class_name}"
-        nickname = f"{self._group_prefix.lower()}-{class_name.lower()}"
-        nickname = "".join(c for c in nickname if c.isalnum() or c == "-")
+        sanitized = _sanitize_nickname(class_name)
+        nickname = template.replace("{k}", sanitized)
+        display_name = nickname  # z.B. "10a_sus"
 
         # Existierende Gruppe suchen
-        groups = self._graph.list_groups(display_name)
+        groups = self._graph.list_groups(nickname)
         for g in groups:
             if g.get("displayName") == display_name:
-                self._group_cache[class_name] = g["id"]
+                cache[cache_key] = g["id"]
                 return g["id"]
 
         # Neue Gruppe erstellen
@@ -395,7 +436,7 @@ class M365Plugin(PluginBase):
                 }
             )
             group_id = group["id"]
-            self._group_cache[class_name] = group_id
+            cache[cache_key] = group_id
             return group_id
         except GraphApiError as exc:
             warnings.warn(
@@ -406,36 +447,53 @@ class M365Plugin(PluginBase):
     def _assign_to_class_group(
         self, user_id: str, class_name: str, student: dict
     ) -> None:
-        """Fügt User zur Klassengruppe hinzu und setzt Lehrer als Owner."""
-        group_id = self._ensure_class_group(class_name)
-        if not group_id:
-            return
+        """Fügt User zur SuS-Gruppe hinzu und pflegt KuK-Gruppe."""
+        # --- SuS-Gruppe: Schüler als Member, Lehrer als Owner ---
+        sus_id = self._ensure_group(
+            class_name, self._group_sus_template, self._sus_cache
+        )
+        if sus_id:
+            try:
+                self._graph.add_member(sus_id, user_id)
+            except GraphApiError as exc:
+                if "already exist" not in str(exc).lower():
+                    warnings.warn(f"SuS-Mitglied {user_id}: {exc}")
 
+            # Klassenlehrer als Owner der SuS-Gruppe (best-effort)
+            for teacher_field in ("class_teacher_1", "class_teacher_2"):
+                teacher_name = student.get(teacher_field, "")
+                if teacher_name:
+                    self._add_teacher_to_group(sus_id, teacher_name, as_owner=True)
+
+        # --- KuK-Gruppe: Lehrer als Member (einmal pro Klasse) ---
+        if class_name not in self._kuk_processed:
+            self._kuk_processed.add(class_name)
+            kuk_id = self._ensure_group(
+                class_name, self._group_kuk_template, self._kuk_cache
+            )
+            if kuk_id:
+                for teacher_field in ("class_teacher_1", "class_teacher_2"):
+                    teacher_name = student.get(teacher_field, "")
+                    if teacher_name:
+                        self._add_teacher_to_group(kuk_id, teacher_name, as_owner=False)
+
+    def _add_teacher_to_group(
+        self, group_id: str, teacher_name: str, *, as_owner: bool
+    ) -> None:
+        """Sucht den Lehrer per Nachname und fügt ihn zur Gruppe hinzu."""
         try:
-            self._graph.add_member(group_id, user_id)
-        except GraphApiError as exc:
-            if "already exist" not in str(exc).lower():
-                warnings.warn(f"Gruppenmitglied {user_id}: {exc}")
-
-        # Klassenlehrer als Owner (best-effort)
-        for teacher_field in ("class_teacher_1", "class_teacher_2"):
-            teacher_name = student.get(teacher_field, "")
-            if teacher_name:
-                self._set_teacher_as_owner(group_id, teacher_name)
-
-    def _set_teacher_as_owner(self, group_id: str, teacher_name: str) -> None:
-        """Sucht den Lehrer per UPN/Name und setzt ihn als Gruppen-Owner."""
-        try:
-            # Versuche UPN-basierte Suche (name@domain)
-            users = self._graph.list_users(self._domain)
+            users = self._all_users or self._graph.list_users(self._domain)
             for u in users:
                 surname = u.get("surname", "")
                 if surname and surname.lower() == teacher_name.lower():
                     try:
-                        self._graph.add_owner(group_id, u["id"])
+                        if as_owner:
+                            self._graph.add_owner(group_id, u["id"])
+                        else:
+                            self._graph.add_member(group_id, u["id"])
                     except GraphApiError as exc:
                         if "already exist" not in str(exc).lower():
-                            warnings.warn(f"Owner {teacher_name}: {exc}")
+                            warnings.warn(f"Lehrer {teacher_name}: {exc}")
                     return
         except Exception:
             pass
@@ -443,16 +501,18 @@ class M365Plugin(PluginBase):
     def _move_between_groups(
         self, user_id: str, old_class: str, new_class: str, student: dict
     ) -> None:
-        """Verschiebt einen User von der alten in die neue Klassengruppe."""
-        # Aus alter Gruppe entfernen
-        old_group_id = self._ensure_class_group(old_class)
-        if old_group_id:
+        """Verschiebt einen User zwischen SuS-Gruppen bei Klassenwechsel."""
+        # Aus alter SuS-Gruppe entfernen
+        old_sus_id = self._ensure_group(
+            old_class, self._group_sus_template, self._sus_cache
+        )
+        if old_sus_id:
             try:
-                self._graph.remove_member(old_group_id, user_id)
+                self._graph.remove_member(old_sus_id, user_id)
             except GraphApiError:
                 pass
 
-        # In neue Gruppe aufnehmen
+        # In neue SuS-Gruppe aufnehmen + KuK-Gruppe pflegen
         self._assign_to_class_group(user_id, new_class, student)
 
     def _collect_existing_emails(self) -> set[str]:
@@ -462,6 +522,11 @@ class M365Plugin(PluginBase):
             return {u.get("userPrincipalName", "").lower() for u in users}
         except GraphApiError:
             return set()
+
+
+def _sanitize_nickname(text: str) -> str:
+    """Bereinigt einen Klassennamen für mailNickname (a-z, 0-9, -, _)."""
+    return re.sub(r"[^a-z0-9_\-]", "", text.lower())
 
 
 def _generate_password(length: int = 16) -> str:

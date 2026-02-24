@@ -515,7 +515,11 @@ class MainWindow(QMainWindow):
             child = QTreeWidgetItem(cat)
             child.setText(0, f"{s['last_name']}, {s['first_name']}")
             if show_class:
-                child.setText(1, f"Klasse: {s['class_name']}")
+                email = (s.get("email") or "").strip()
+                info = f"Klasse: {s['class_name']}"
+                if email:
+                    info += f" | {email}"
+                child.setText(1, info)
             elif detail:
                 child.setText(1, detail)
             child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
