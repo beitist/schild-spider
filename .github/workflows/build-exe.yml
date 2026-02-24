@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pyodbc pyinstaller
+        run: pip install -r requirements.txt pyinstaller
 
       # PyInstaller baut die .exe als Single-File mit eingebettetem Icon
       - name: Build EXE
@@ -40,7 +40,7 @@ jobs:
           --hidden-import=adapters.base
           --hidden-import=adapters.schild_csv
           --hidden-import=adapters.schild_db
-          --hidden-import=pyodbc
+          --hidden-import=pymysql
           --hidden-import=plugins
           --hidden-import=plugins.base
           --hidden-import=plugins.hagen_id

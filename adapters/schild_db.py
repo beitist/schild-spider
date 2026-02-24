@@ -88,7 +88,7 @@ _SQL_WRITE_BACK_EMAIL = """
 
 
 class SchildDbAdapter(AdapterBase):
-    """Liest Schülerdaten direkt aus der SchILD-Datenbank (MariaDB/ODBC)."""
+    """Liest Schülerdaten direkt aus der SchILD-Datenbank (MariaDB)."""
 
     def __init__(
         self,
@@ -112,7 +112,7 @@ class SchildDbAdapter(AdapterBase):
 
     @classmethod
     def adapter_name(cls) -> str:
-        return "SchILD Datenbank (ODBC)"
+        return "SchILD Datenbank (MariaDB)"
 
     @classmethod
     def config_schema(cls) -> list[ConfigField]:
@@ -171,24 +171,22 @@ class SchildDbAdapter(AdapterBase):
     # --- Verbindung ---
 
     def _connect(self):
-        """Stellt eine ODBC-Verbindung zur SchILD-DB her."""
+        """Stellt eine Verbindung zur SchILD-DB her (pymysql)."""
         try:
-            import pyodbc
+            import pymysql
         except ImportError as exc:
             raise ImportError(
-                "pyodbc ist nicht installiert. Bitte installieren: pip install pyodbc"
+                "pymysql ist nicht installiert. Bitte installieren: pip install pymysql"
             ) from exc
 
-        conn_str = (
-            f"DRIVER={{MariaDB ODBC 3.1 Driver}};"
-            f"SERVER={self.db_host};"
-            f"PORT={self.db_port};"
-            f"DATABASE={self.db_name};"
-            f"UID={self.db_user};"
-            f"PWD={self.db_password};"
-            f"CHARSET=utf8mb4;"
+        return pymysql.connect(
+            host=self.db_host,
+            port=int(self.db_port),
+            database=self.db_name,
+            user=self.db_user,
+            password=self.db_password,
+            charset="utf8mb4",
         )
-        return pyodbc.connect(conn_str)
 
     def test_connection(self) -> tuple[bool, str]:
         """Testet die Verbindung und gibt Schülerzahl zurück."""
@@ -380,7 +378,7 @@ class SchildDbAdapter(AdapterBase):
         """Konvertiert DB-Datumswert (DATETIME) nach ISO-String (YYYY-MM-DD)."""
         if value is None:
             return ""
-        # pyodbc gibt datetime.datetime oder datetime.date zurück
+        # pymysql gibt datetime.datetime oder datetime.date zurück
         if hasattr(value, "strftime"):
             return value.strftime("%Y-%m-%d")
         s = str(value).strip()

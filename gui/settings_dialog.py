@@ -142,7 +142,7 @@ class SettingsDialog(QDialog):
                 config_class=adapter_class,
                 config=config,
                 show_enabled=False,
-                show_test=False,
+                show_test=True,
             )
             self._adapter_stack.addWidget(page)
             self._adapter_pages[key] = page
