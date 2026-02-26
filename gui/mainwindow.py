@@ -279,7 +279,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.log.connect(self._log_msg)
+        worker.log_signal.connect(self._log_msg)
         worker.finished.connect(self._on_load_done)
         worker.error.connect(self._on_load_error)
         worker.finished.connect(thread.quit)
@@ -348,7 +348,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.log.connect(self._log_msg)
+        worker.log_signal.connect(self._log_msg)
         worker.finished.connect(self._on_plugin_compute_done)
         worker.error.connect(self._on_plugin_worker_error)
         worker.finished.connect(thread.quit)
@@ -436,7 +436,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.log.connect(self._log_msg)
+        worker.log_signal.connect(self._log_msg)
         worker.write_back_ready.connect(self._on_write_back_ready)
         worker.error.connect(self._on_plugin_worker_error)
         worker.finished.connect(thread.quit)

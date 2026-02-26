@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -9,17 +10,24 @@ from core.models import ChangeSet
 from core.plugin_loader import load_adapter
 from plugins.base import PluginBase
 
+log = logging.getLogger(__name__)
+
 
 class LoadWorker(QObject):
     """Lädt Schüler- und Lehrerdaten vom konfigurierten Adapter."""
 
     finished = Signal(list, list)  # (students, teachers)
     error = Signal(str)
-    log = Signal(str)
+    log_signal = Signal(str)
 
     def __init__(self, settings: dict) -> None:
         super().__init__()
         self.settings = settings
+
+    def _emit(self, msg: str) -> None:
+        """Gibt Meldung ans GUI UND in spider.log aus."""
+        log.info(msg)
+        self.log_signal.emit(msg)
 
     @Slot()
     def run(self) -> None:
@@ -27,10 +35,10 @@ class LoadWorker(QObject):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
 
-                self.log.emit("Lade Schülerdaten...")
+                self._emit("Lade Schülerdaten...")
                 adapter = load_adapter(self.settings)
                 students = adapter.load()
-                self.log.emit(f"{len(students)} Schüler geladen.")
+                self._emit(f"{len(students)} Schüler geladen.")
 
                 # Debug-Klassenfilter
                 class_filter = (
@@ -41,23 +49,24 @@ class LoadWorker(QObject):
                     students = [
                         s for s in students if class_filter in s.class_name.lower()
                     ]
-                    self.log.emit(
+                    self._emit(
                         f"\u26a0 FILTER aktiv: '{class_filter}' "
                         f"\u2192 {len(students)} von {before} Sch\u00fclern"
                     )
 
                 teachers = adapter.load_teachers()
                 if teachers:
-                    self.log.emit(f"{len(teachers)} Lehrer geladen.")
+                    self._emit(f"{len(teachers)} Lehrer geladen.")
                 else:
-                    self.log.emit("Keine Lehrerdaten (CSV nicht konfiguriert).")
+                    self._emit("Keine Lehrerdaten (CSV nicht konfiguriert).")
 
                 for w in caught:
-                    self.log.emit(f"⚠ {w.message}")
+                    self._emit(f"⚠ {w.message}")
 
             self.finished.emit(students, teachers)
 
         except Exception as exc:
+            log.exception("LoadWorker fehlgeschlagen")
             self.error.emit(str(exc))
 
 
@@ -66,7 +75,7 @@ class PluginComputeWorker(QObject):
 
     finished = Signal(str, ChangeSet)  # (plugin_key, changeset)
     error = Signal(str, str)  # (plugin_key, error_message)
-    log = Signal(str)
+    log_signal = Signal(str)
 
     def __init__(
         self,
@@ -83,15 +92,20 @@ class PluginComputeWorker(QObject):
         self.max_suspend = max_suspend
         self.teachers = teachers or []
 
+    def _emit(self, msg: str) -> None:
+        """Gibt Meldung ans GUI UND in spider.log aus."""
+        log.info(msg)
+        self.log_signal.emit(msg)
+
     @Slot()
     def run(self) -> None:
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
 
-                self.log.emit(f"Berechne ChangeSet für {self.plugin_key}...")
+                self._emit(f"Berechne ChangeSet für {self.plugin_key}...")
                 cs = compute_changeset(self.students, self.plugin, self.max_suspend)
-                self.log.emit(
+                self._emit(
                     f"  {self.plugin_key}: {len(cs.new)} neu, "
                     f"{len(cs.changed)} geändert, "
                     f"{len(cs.suspended)} abgemeldet, "
@@ -99,29 +113,31 @@ class PluginComputeWorker(QObject):
                 )
 
                 # Vorschau-Daten anreichern (z.B. Emails vorgenerieren)
+                self._emit("Vorschau anreichern...")
                 self.plugin.enrich_preview(cs)
 
                 # Gruppen-Diff berechnen (für Vorschau)
                 if self.students:
                     from dataclasses import asdict
 
-                    self.log.emit("Berechne Gruppen-Diff...")
+                    self._emit("Berechne Gruppen-Diff...")
                     student_dicts = [asdict(s) for s in self.students]
                     teacher_dicts = [asdict(t) for t in self.teachers]
                     cs.group_changes = self.plugin.compute_group_diff(
                         student_dicts, teacher_dicts
                     )
                     if cs.group_changes:
-                        self.log.emit(
+                        self._emit(
                             f"  {len(cs.group_changes)} Gruppenänderungen geplant"
                         )
 
                 for w in caught:
-                    self.log.emit(f"⚠ {w.message}")
+                    self._emit(f"⚠ {w.message}")
 
             self.finished.emit(self.plugin_key, cs)
 
         except Exception as exc:
+            log.exception("ComputeWorker fehlgeschlagen: %s", self.plugin_key)
             self.error.emit(self.plugin_key, str(exc))
 
 
@@ -130,7 +146,7 @@ class PluginApplyWorker(QObject):
 
     finished = Signal(str)  # plugin_key
     error = Signal(str, str)  # (plugin_key, error_message)
-    log = Signal(str)
+    log_signal = Signal(str)
     write_back_ready = Signal(str, list)  # (plugin_key, write_back_data)
 
     def __init__(
@@ -144,35 +160,46 @@ class PluginApplyWorker(QObject):
         self.plugin = plugin
         self.changeset = changeset
 
+    def _emit(self, msg: str) -> None:
+        """Gibt Meldung ans GUI UND in spider.log aus."""
+        log.info(msg)
+        self.log_signal.emit(msg)
+
     @Slot()
     def run(self) -> None:
         try:
             cs = self.changeset
+            phase = "init"
 
             if cs.new:
-                self.log.emit(f"Lege {len(cs.new)} neue Schüler an...")
+                phase = f"apply_new ({len(cs.new)} Schüler)"
+                self._emit(f"Lege {len(cs.new)} neue Schüler an...")
                 results = self.plugin.apply_new(cs.new)
-                self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
+                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
 
             if cs.changed:
-                self.log.emit(f"Aktualisiere {len(cs.changed)} Schüler...")
+                phase = f"apply_changes ({len(cs.changed)} Schüler)"
+                self._emit(f"Aktualisiere {len(cs.changed)} Schüler...")
                 results = self.plugin.apply_changes(cs.changed)
-                self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
+                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
 
             if cs.photo_updates:
-                self.log.emit(f"Aktualisiere {len(cs.photo_updates)} Fotos...")
+                phase = f"apply_photos ({len(cs.photo_updates)} Fotos)"
+                self._emit(f"Aktualisiere {len(cs.photo_updates)} Fotos...")
                 results = self.plugin.apply_changes(cs.photo_updates)
-                self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
+                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
 
             if cs.suspended:
-                self.log.emit(f"Deaktiviere {len(cs.suspended)} Schüler...")
+                phase = f"apply_suspend ({len(cs.suspended)} Schüler)"
+                self._emit(f"Deaktiviere {len(cs.suspended)} Schüler...")
                 results = self.plugin.apply_suspend(cs.suspended)
-                self.log.emit(f"  Ergebnis: {len(results)} verarbeitet")
+                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
 
-            # Write-back-Daten prüfen und im Log anzeigen (NICHT automatisch schreiben)
+            # Write-back-Daten prüfen und im Log anzeigen
+            phase = "write_back_check"
             write_back_data = self.plugin.get_write_back_data()
             if write_back_data:
-                self.log.emit(f"\n--- Generierte Daten ({len(write_back_data)}) ---")
+                self._emit(f"\n--- Generierte Daten ({len(write_back_data)}) ---")
                 for item in write_back_data:
                     name = (
                         f"{item.get('first_name', '')} {item.get('last_name', '')}"
@@ -180,22 +207,27 @@ class PluginApplyWorker(QObject):
                     email = item.get("email", "")
                     cls = item.get("class_name", "")
                     if name and email:
-                        self.log.emit(f"  {cls}: {name} \u2192 {email}")
-                self.log.emit(
+                        self._emit(f"  {cls}: {name} \u2192 {email}")
+                self._emit(
                     "Bitte \u00fcber 'R\u00fcckschreiben' an SchILD zur\u00fcckschreiben."
                 )
                 self.write_back_ready.emit(self.plugin_key, write_back_data)
 
-            # Gruppenänderungen anwenden (vom User in der Vorschau ausgewählt)
+            # Gruppenänderungen anwenden
             if cs.group_changes:
-                self.log.emit(f"Wende {len(cs.group_changes)} Gruppenänderungen an...")
+                phase = f"apply_groups ({len(cs.group_changes)} Änderungen)"
+                self._emit(f"Wende {len(cs.group_changes)} Gruppenänderungen an...")
                 sync_results = self.plugin.apply_group_changes(cs.group_changes)
                 if sync_results:
                     ok = sum(1 for r in sync_results if r.get("success"))
                     fail = len(sync_results) - ok
-                    self.log.emit(f"  Gruppen: {ok} OK, {fail} Fehler")
+                    self._emit(f"  Gruppen: {ok} OK, {fail} Fehler")
 
+            phase = "done"
             self.finished.emit(self.plugin_key)
 
         except Exception as exc:
-            self.error.emit(self.plugin_key, str(exc))
+            log.exception(
+                "ApplyWorker fehlgeschlagen: %s (Phase: %s)", self.plugin_key, phase
+            )
+            self.error.emit(self.plugin_key, f"{exc} (Phase: {phase})")

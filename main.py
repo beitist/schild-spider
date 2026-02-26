@@ -1,7 +1,9 @@
 """Schild Spider — Startpunkt der Anwendung."""
 
+import faulthandler
 import logging
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -13,7 +15,7 @@ from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
 APP_NAME = "Schild Spider"
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
 
@@ -94,9 +96,14 @@ def _setup_logging() -> None:
     root.addHandler(file_handler)
     root.addHandler(stream_handler)
 
+    # faulthandler: schreibt nativen Crash-Traceback (Segfault etc.) in eigene Datei.
+    # File-Handle wird als Attribut gespeichert damit er nicht vom GC geschlossen wird.
+    _setup_logging._crash_fh = open("spider_crash.log", "w")  # noqa: SIM115
+    faulthandler.enable(file=_setup_logging._crash_fh)
+
 
 def _install_exception_hook() -> None:
-    """Fängt unbehandelte Exceptions und loggt sie in spider.log."""
+    """Fängt unbehandelte Exceptions in Main- UND Worker-Threads."""
     original_hook = sys.excepthook
 
     def hook(exc_type, exc_value, exc_tb):  # noqa: ANN001
@@ -106,6 +113,16 @@ def _install_exception_hook() -> None:
         original_hook(exc_type, exc_value, exc_tb)
 
     sys.excepthook = hook
+
+    # Thread-Exceptions (Python 3.8+): fängt Exceptions in Worker-Threads
+    def thread_hook(args: threading.ExceptHookArgs) -> None:
+        logging.critical(
+            "Unbehandelte Exception in Thread '%s'",
+            args.thread.name if args.thread else "?",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = thread_hook
 
 
 def main() -> None:
