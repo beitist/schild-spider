@@ -331,6 +331,7 @@ class MainWindow(QMainWindow):
         plugin_class = get_plugin_class(plugin_key)
         plugin_config = self._settings.get("plugins", {}).get(plugin_key, {})
         plugin_instance = plugin_class.from_config(plugin_config)
+        card.plugin_instance = plugin_instance
 
         max_suspend = self._settings.get("failsafe", {}).get(
             "max_suspend_percentage", 15.0
@@ -422,9 +423,13 @@ class MainWindow(QMainWindow):
 
         filtered_cs = self._build_filtered_changeset(card)
 
-        plugin_class = get_plugin_class(plugin_key)
-        plugin_config = self._settings.get("plugins", {}).get(plugin_key, {})
-        plugin_instance = plugin_class.from_config(plugin_config)
+        # Gecachte Plugin-Instanz aus Compute-Phase verwenden
+        # (enthält Token, User-Cache, Gruppen-Cache etc.)
+        plugin_instance = card.plugin_instance
+        if plugin_instance is None:
+            plugin_class = get_plugin_class(plugin_key)
+            plugin_config = self._settings.get("plugins", {}).get(plugin_key, {})
+            plugin_instance = plugin_class.from_config(plugin_config)
 
         thread = QThread()
         worker = PluginApplyWorker(plugin_key, plugin_instance, filtered_cs)

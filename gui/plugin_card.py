@@ -56,6 +56,7 @@ class PluginCard(QFrame):
         self._display_name = display_name
         self._state = PluginCardState.IDLE
         self._changeset: ChangeSet | None = None
+        self._plugin_instance: object | None = None
         self._excluded_ids: set[str] = set()
         self._is_selected = False
 
@@ -89,6 +90,14 @@ class PluginCard(QFrame):
     def changeset(self, value: ChangeSet | None) -> None:
         self._changeset = value
         self._update_ui()
+
+    @property
+    def plugin_instance(self) -> object | None:
+        return self._plugin_instance
+
+    @plugin_instance.setter
+    def plugin_instance(self, value: object | None) -> None:
+        self._plugin_instance = value
 
     @property
     def excluded_ids(self) -> set[str]:
