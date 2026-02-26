@@ -48,17 +48,15 @@ _SQL_CLASS_TEACHERS = """
 # eigeneschule_faecher → Zeugnisbez (nicht Bezeichnung!)
 _SQL_COURSES = """
     SELECT
-        ld.Schueler_ID        AS student_id,
+        la.Schueler_ID        AS student_id,
         f.Zeugnisbez          AS course_name,
         kl.Nachname           AS teacher_name,
         ld.Kurs_ID            AS course_id
     FROM schuelerleistungsdaten ld
+    JOIN schuelerlernabschnittsdaten la ON ld.Abschnitt_ID = la.ID
     LEFT JOIN eigeneschule_faecher f ON ld.Fach_ID = f.ID
     LEFT JOIN k_lehrer kl ON ld.FachLehrer = kl.Kuerzel
-    WHERE ld.Abschnitt_ID IN (
-        SELECT la.ID FROM schuelerlernabschnittsdaten la
-        WHERE la.Jahr = %s AND la.Abschnitt = %s
-    )
+    WHERE la.Jahr = %s AND la.Abschnitt = %s
 """
 
 _SQL_TEACHERS = """
