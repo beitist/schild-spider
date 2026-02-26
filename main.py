@@ -13,7 +13,7 @@ from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
 APP_NAME = "Schild Spider"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
 
@@ -74,12 +74,43 @@ def _build_splash_pixmap() -> QPixmap | None:
     return splash_pm
 
 
+def _setup_logging() -> None:
+    """Konfiguriert Logging: immer in spider.log, bei Console auch auf stdout."""
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+
+    # Datei-Handler: spider.log im Arbeitsverzeichnis (überschreibt beim Start)
+    file_handler = logging.FileHandler("spider.log", mode="w", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+
+    # Stream-Handler: stdout (nützlich bei Entwicklung, leer bei --windowed)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.DEBUG)
+    stream_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+    root.addHandler(stream_handler)
+
+
+def _install_exception_hook() -> None:
+    """Fängt unbehandelte Exceptions und loggt sie in spider.log."""
+    original_hook = sys.excepthook
+
+    def hook(exc_type, exc_value, exc_tb):  # noqa: ANN001
+        logging.critical(
+            "Unbehandelte Exception", exc_info=(exc_type, exc_value, exc_tb)
+        )
+        original_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = hook
+
+
 def main() -> None:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _setup_logging()
+    _install_exception_hook()
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
