@@ -29,6 +29,7 @@ class M365Plugin(PluginBase):
         group_kuk_template: str,
         usage_location: str,
         display_name_template: str = "",
+        default_password: str = "",
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
@@ -37,6 +38,7 @@ class M365Plugin(PluginBase):
         self._group_kuk_template = group_kuk_template or "{k}_kuk"
         self._usage_location = usage_location or "DE"
         self._display_name_template = display_name_template or "{k} {n}, {v}"
+        self._default_password = default_password or ""
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
@@ -101,6 +103,13 @@ class M365Plugin(PluginBase):
                 default="{k}_kuk",
             ),
             ConfigField(
+                key="default_password",
+                label="Start-Passwort (leer = zufällig)",
+                placeholder="Schule2223!",
+                default="Schule2223!",
+                required=False,
+            ),
+            ConfigField(
                 key="usage_location",
                 label="Nutzungsstandort (ISO)",
                 placeholder="DE",
@@ -127,6 +136,7 @@ class M365Plugin(PluginBase):
             group_kuk_template=config.get("group_kuk_template", "{k}_kuk"),
             usage_location=config.get("usage_location", "DE"),
             display_name_template=config.get("display_name_template", "{k} {n}, {v}"),
+            default_password=config.get("default_password", "Schule2223!"),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -269,7 +279,7 @@ class M365Plugin(PluginBase):
                     "department": student.get("class_name", ""),
                     "usageLocation": self._usage_location,
                     "passwordProfile": {
-                        "password": _generate_password(),
+                        "password": self._default_password or _generate_password(),
                         "forceChangePasswordNextSignIn": True,
                     },
                 }
@@ -522,6 +532,304 @@ class M365Plugin(PluginBase):
             return {u.get("userPrincipalName", "").lower() for u in users}
         except GraphApiError:
             return set()
+
+    # --- Gruppen-Sync (Compute + Apply getrennt für Preview) ---
+
+    def _build_lookups(self) -> None:
+        """Baut Lookup-Dicts für Schüler (employeeId) und Lehrer (Nachname)."""
+        if self._all_users is None:
+            self._all_users = self._graph.list_users(self._domain)
+
+        self._eid_to_uid: dict[str, str] = {}
+        self._uid_to_name: dict[str, str] = {}
+        for u in self._all_users:
+            uid = u["id"]
+            self._uid_to_name[uid] = u.get("displayName") or u.get("surname", uid)
+            eid = u.get("employeeId")
+            if eid:
+                self._eid_to_uid[eid] = uid
+
+        self._surname_to_uid: dict[str, str] = {}
+        for u in self._all_users:
+            surname = (u.get("surname") or "").strip().lower()
+            if surname and surname not in self._surname_to_uid:
+                self._surname_to_uid[surname] = u["id"]
+
+    def _find_group(
+        self, class_name: str, template: str, cache: dict[str, str]
+    ) -> tuple[str | None, bool]:
+        """Sucht eine Gruppe, erstellt sie NICHT. Returns: (group_id, is_new)."""
+        if not class_name:
+            return None, False
+
+        cache_key = f"{template}|{class_name}"
+        if cache_key in cache:
+            return cache[cache_key], False
+
+        sanitized = _sanitize_nickname(class_name)
+        nickname = template.replace("{k}", sanitized)
+        display_name = nickname
+
+        groups = self._graph.list_groups(nickname)
+        for g in groups:
+            if g.get("displayName") == display_name:
+                cache[cache_key] = g["id"]
+                return g["id"], False
+
+        return None, True  # Gruppe existiert nicht → is_new=True
+
+    def compute_group_diff(
+        self, all_students: list[dict], teachers: list[dict]
+    ) -> list[dict]:
+        """Berechnet geplante Gruppenänderungen (SOLL vs IST) für die Vorschau."""
+        self._build_lookups()
+
+        # Schüler nach Klasse gruppieren
+        classes: dict[str, list[dict]] = {}
+        for s in all_students:
+            cn = s.get("class_name", "")
+            if cn:
+                classes.setdefault(cn, []).append(s)
+
+        changes: list[dict] = []
+        for class_name, class_students in sorted(classes.items()):
+            changes.extend(self._diff_class_sus(class_name, class_students))
+            changes.extend(self._diff_class_kuk(class_name, class_students))
+        return changes
+
+    def _diff_class_sus(self, class_name: str, students: list[dict]) -> list[dict]:
+        """Berechnet Diff für eine SuS-Gruppe (ohne auszuführen)."""
+        changes: list[dict] = []
+        group_name = self._group_sus_template.replace(
+            "{k}", _sanitize_nickname(class_name)
+        )
+        group_id, is_new = self._find_group(
+            class_name, self._group_sus_template, self._sus_cache
+        )
+
+        if is_new:
+            changes.append(
+                {
+                    "id": f"sus:{class_name}:create",
+                    "group_type": "sus",
+                    "group_name": group_name,
+                    "group_id": "",
+                    "action": "create_group",
+                    "member_name": "",
+                    "member_id": "",
+                    "class_name": class_name,
+                }
+            )
+
+        # SOLL: aktive Schüler dieser Klasse
+        expected_ids: set[str] = set()
+        for s in students:
+            uid = self._eid_to_uid.get(s.get("school_internal_id", ""))
+            if uid:
+                expected_ids.add(uid)
+
+        # IST: aktuelle Mitglieder (nur bei existierenden Gruppen)
+        actual_ids: set[str] = set()
+        if group_id:
+            current_members = self._graph.get_members(group_id)
+            actual_ids = {m["id"] for m in current_members}
+
+        for uid in sorted(expected_ids - actual_ids):
+            changes.append(
+                {
+                    "id": f"sus:{class_name}:add:{uid}",
+                    "group_type": "sus",
+                    "group_name": group_name,
+                    "group_id": group_id or "",
+                    "action": "add_member",
+                    "member_name": self._uid_to_name.get(uid, uid),
+                    "member_id": uid,
+                    "class_name": class_name,
+                }
+            )
+
+        for uid in sorted(actual_ids - expected_ids):
+            changes.append(
+                {
+                    "id": f"sus:{class_name}:rm:{uid}",
+                    "group_type": "sus",
+                    "group_name": group_name,
+                    "group_id": group_id or "",
+                    "action": "remove_member",
+                    "member_name": self._uid_to_name.get(uid, uid),
+                    "member_id": uid,
+                    "class_name": class_name,
+                }
+            )
+
+        return changes
+
+    def _diff_class_kuk(self, class_name: str, students: list[dict]) -> list[dict]:
+        """Berechnet Diff für eine KuK-Gruppe (ohne auszuführen)."""
+        changes: list[dict] = []
+        group_name = self._group_kuk_template.replace(
+            "{k}", _sanitize_nickname(class_name)
+        )
+        group_id, is_new = self._find_group(
+            class_name, self._group_kuk_template, self._kuk_cache
+        )
+
+        if is_new:
+            changes.append(
+                {
+                    "id": f"kuk:{class_name}:create",
+                    "group_type": "kuk",
+                    "group_name": group_name,
+                    "group_id": "",
+                    "action": "create_group",
+                    "member_name": "",
+                    "member_id": "",
+                    "class_name": class_name,
+                }
+            )
+
+        # SOLL: alle Lehrer dieser Klasse (Klassenlehrer + Fachlehrer)
+        expected_teacher_names: set[str] = set()
+        for s in students:
+            for f in ("class_teacher_1", "class_teacher_2"):
+                name = (s.get(f) or "").strip().lower()
+                if name:
+                    expected_teacher_names.add(name)
+            for course in s.get("courses", []):
+                if isinstance(course, dict):
+                    name = (course.get("teacher_name") or "").strip().lower()
+                else:
+                    name = (course.teacher_name or "").strip().lower()
+                if name:
+                    expected_teacher_names.add(name)
+
+        expected_ids: set[str] = set()
+        for name in expected_teacher_names:
+            uid = self._surname_to_uid.get(name)
+            if uid:
+                expected_ids.add(uid)
+
+        # IST
+        actual_ids: set[str] = set()
+        if group_id:
+            current_members = self._graph.get_members(group_id)
+            actual_ids = {m["id"] for m in current_members}
+
+        for uid in sorted(expected_ids - actual_ids):
+            changes.append(
+                {
+                    "id": f"kuk:{class_name}:add:{uid}",
+                    "group_type": "kuk",
+                    "group_name": group_name,
+                    "group_id": group_id or "",
+                    "action": "add_member",
+                    "member_name": self._uid_to_name.get(uid, uid),
+                    "member_id": uid,
+                    "class_name": class_name,
+                }
+            )
+
+        for uid in sorted(actual_ids - expected_ids):
+            changes.append(
+                {
+                    "id": f"kuk:{class_name}:rm:{uid}",
+                    "group_type": "kuk",
+                    "group_name": group_name,
+                    "group_id": group_id or "",
+                    "action": "remove_member",
+                    "member_name": self._uid_to_name.get(uid, uid),
+                    "member_id": uid,
+                    "class_name": class_name,
+                }
+            )
+
+        return changes
+
+    def apply_group_changes(self, changes: list[dict]) -> list[dict]:
+        """Führt die vom User ausgewählten Gruppenänderungen aus."""
+        results: list[dict] = []
+
+        for ch in changes:
+            action = ch["action"]
+            class_name = ch["class_name"]
+            group_type = ch["group_type"]
+
+            try:
+                if action == "create_group":
+                    template = (
+                        self._group_sus_template
+                        if group_type == "sus"
+                        else self._group_kuk_template
+                    )
+                    cache = self._sus_cache if group_type == "sus" else self._kuk_cache
+                    group_id = self._ensure_group(class_name, template, cache)
+                    results.append(
+                        {
+                            "action": "create_group",
+                            "group": ch["group_name"],
+                            "success": bool(group_id),
+                            "message": group_id or "Erstellung fehlgeschlagen",
+                        }
+                    )
+
+                elif action == "add_member":
+                    # Gruppe sicherstellen (falls gerade erst erstellt)
+                    template = (
+                        self._group_sus_template
+                        if group_type == "sus"
+                        else self._group_kuk_template
+                    )
+                    cache = self._sus_cache if group_type == "sus" else self._kuk_cache
+                    group_id = self._ensure_group(class_name, template, cache)
+                    if group_id:
+                        self._graph.add_member(group_id, ch["member_id"])
+                        results.append(
+                            {
+                                "action": "add_member",
+                                "group": ch["group_name"],
+                                "success": True,
+                                "message": ch["member_name"],
+                            }
+                        )
+
+                elif action == "remove_member":
+                    group_id = ch.get("group_id")
+                    if group_id:
+                        self._graph.remove_member(group_id, ch["member_id"])
+                        results.append(
+                            {
+                                "action": "remove_member",
+                                "group": ch["group_name"],
+                                "success": True,
+                                "message": ch["member_name"],
+                            }
+                        )
+
+            except GraphApiError as exc:
+                if "already exist" not in str(exc).lower():
+                    results.append(
+                        {
+                            "action": action,
+                            "group": ch.get("group_name", ""),
+                            "success": False,
+                            "message": str(exc),
+                        }
+                    )
+
+        # Klassenlehrer als Owner der SuS-Gruppen (best-effort)
+        owner_processed: set[str] = set()
+        for ch in changes:
+            if ch["group_type"] == "sus" and ch["class_name"] not in owner_processed:
+                owner_processed.add(ch["class_name"])
+                sus_id = self._sus_cache.get(
+                    f"{self._group_sus_template}|{ch['class_name']}"
+                )
+                if sus_id:
+                    # Lehrer-Info aus den changes ableiten geht nicht direkt,
+                    # daher aus _all_users per Nachname (wie bisher)
+                    pass  # Owner werden in apply_new/apply_changes gesetzt
+
+        return results
 
 
 def _sanitize_nickname(text: str) -> str:

@@ -86,7 +86,7 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 
 # Wird bei jeder strukturellen Änderung am Settings-Schema hochgezählt.
 # load_settings() prüft dies und migriert automatisch.
-SETTINGS_VERSION = 6
+SETTINGS_VERSION = 7
 
 
 def generate_default_settings(

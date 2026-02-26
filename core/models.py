@@ -53,6 +53,7 @@ class ChangeSet:
     changed: list[dict] = field(default_factory=list)
     suspended: list[str] = field(default_factory=list)  # school_internal_ids
     photo_updates: list[dict] = field(default_factory=list)
+    group_changes: list[dict] = field(default_factory=list)
 
     total_in_source: int = 0
     total_in_target: int = 0

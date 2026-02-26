@@ -338,7 +338,11 @@ class MainWindow(QMainWindow):
 
         thread = QThread()
         worker = PluginComputeWorker(
-            plugin_key, plugin_instance, self._students, max_suspend
+            plugin_key,
+            plugin_instance,
+            self._students,
+            max_suspend,
+            teachers=self._teachers,
         )
         worker.moveToThread(thread)
 
@@ -372,6 +376,7 @@ class MainWindow(QMainWindow):
             or changeset.changed
             or changeset.suspended
             or changeset.photo_updates
+            or changeset.group_changes
         )
         if has_changes and not changeset.requires_force:
             self._log_msg("Vorschau bereit. Pr\u00fcfe die \u00c4nderungen.")
@@ -486,8 +491,16 @@ class MainWindow(QMainWindow):
         self._add_preview_category(
             "Foto-Updates", cs.photo_updates, excluded, detail="Neues Foto"
         )
+        self._add_preview_group_category(
+            "Klassengruppen (SuS)", cs.group_changes, excluded, "sus"
+        )
+        self._add_preview_group_category(
+            "Lehrergruppen (KuK)", cs.group_changes, excluded, "kuk"
+        )
 
-        if not (cs.new or cs.changed or cs.suspended or cs.photo_updates):
+        if not (
+            cs.new or cs.changed or cs.suspended or cs.photo_updates or cs.group_changes
+        ):
             QTreeWidgetItem(self._tree, ["Keine \u00c4nderungen", "Alles synchron"])
 
         self._tree.blockSignals(False)
@@ -577,6 +590,95 @@ class MainWindow(QMainWindow):
         else:
             cat.setCheckState(0, Qt.CheckState.Unchecked)
 
+    def _add_preview_group_category(
+        self,
+        label: str,
+        all_changes: list[dict],
+        excluded: set[str],
+        group_type: str,
+    ) -> None:
+        """Zeigt Gruppen-Änderungen als 3-Level-Baum (Kategorie → Gruppe → Änderung)."""
+        changes = [c for c in all_changes if c.get("group_type") == group_type]
+        if not changes:
+            return
+
+        # Nach Klasse/Gruppe gruppieren
+        from collections import OrderedDict
+
+        groups: OrderedDict[str, list[dict]] = OrderedDict()
+        for c in changes:
+            key = c.get("class_name", "")
+            groups.setdefault(key, []).append(c)
+
+        total_count = len(changes)
+        cat = QTreeWidgetItem(self._tree, [f"{label} ({total_count})", ""])
+        cat.setFlags(cat.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        cat.setExpanded(True)
+
+        cat_all_checked = True
+        cat_any_checked = False
+
+        for class_name, group_changes in groups.items():
+            group_name = group_changes[0].get("group_name", class_name)
+            is_new = any(c["action"] == "create_group" for c in group_changes)
+            member_changes = [c for c in group_changes if c["action"] != "create_group"]
+
+            detail = "NEU" if is_new else ""
+            if member_changes:
+                n = len(member_changes)
+                detail += f" + {n}" if detail else str(n)
+                detail += " Änderung" if n == 1 else " Änderungen"
+
+            group_item = QTreeWidgetItem(cat, [group_name, detail])
+            group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            group_item.setExpanded(True)
+
+            grp_all_checked = True
+            grp_any_checked = False
+
+            for c in group_changes:
+                child = QTreeWidgetItem(group_item)
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setData(0, Qt.ItemDataRole.UserRole, c["id"])
+
+                if c["action"] == "create_group":
+                    child.setText(0, "Gruppe anlegen")
+                elif c["action"] == "add_member":
+                    child.setText(0, f"{c['member_name']}")
+                    child.setText(1, "hinzufügen")
+                elif c["action"] == "remove_member":
+                    child.setText(0, f"{c['member_name']}")
+                    child.setText(1, "entfernen")
+
+                if c["id"] in excluded:
+                    child.setCheckState(0, Qt.CheckState.Unchecked)
+                    grp_all_checked = False
+                else:
+                    child.setCheckState(0, Qt.CheckState.Checked)
+                    grp_any_checked = True
+
+            if grp_all_checked:
+                group_item.setCheckState(0, Qt.CheckState.Checked)
+            elif grp_any_checked:
+                group_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+            else:
+                group_item.setCheckState(0, Qt.CheckState.Unchecked)
+
+            if grp_all_checked:
+                cat_any_checked = True
+            elif grp_any_checked:
+                cat_any_checked = True
+                cat_all_checked = False
+            else:
+                cat_all_checked = False
+
+        if cat_all_checked:
+            cat.setCheckState(0, Qt.CheckState.Checked)
+        elif cat_any_checked:
+            cat.setCheckState(0, Qt.CheckState.PartiallyChecked)
+        else:
+            cat.setCheckState(0, Qt.CheckState.Unchecked)
+
     def _on_tree_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         if column != 0:
             return
@@ -584,29 +686,54 @@ class MainWindow(QMainWindow):
         self._tree.blockSignals(True)
 
         parent = item.parent()
+        grandparent = parent.parent() if parent else None
+
         if parent is None:
-            # Kategorie-Item → Zustand an alle Kinder propagieren
+            # Top-Level (Kategorie) → an Kinder + Enkel propagieren
             state = item.checkState(0)
             if state != Qt.CheckState.PartiallyChecked:
                 for i in range(item.childCount()):
+                    child = item.child(i)
+                    child.setCheckState(0, state)
+                    for j in range(child.childCount()):
+                        child.child(j).setCheckState(0, state)
+        elif grandparent is None:
+            # Level 2 (Gruppe oder Schüler-Eintrag)
+            state = item.checkState(0)
+            if state != Qt.CheckState.PartiallyChecked:
+                # Enkel propagieren (nur bei Gruppen-Items mit Kindern)
+                for i in range(item.childCount()):
                     item.child(i).setCheckState(0, state)
+            # Eltern-Tristate aktualisieren
+            self._update_tristate(parent)
         else:
-            # Kind-Item → Eltern-Tristate aktualisieren
-            checked = sum(
-                1
-                for i in range(parent.childCount())
-                if parent.child(i).checkState(0) == Qt.CheckState.Checked
-            )
-            total = parent.childCount()
-            if checked == 0:
-                parent.setCheckState(0, Qt.CheckState.Unchecked)
-            elif checked == total:
-                parent.setCheckState(0, Qt.CheckState.Checked)
-            else:
-                parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+            # Level 3 (Blatt: einzelne Gruppenänderung)
+            # Eltern-Gruppe aktualisieren
+            self._update_tristate(parent)
+            # Großeltern-Kategorie aktualisieren
+            self._update_tristate(grandparent)
 
         self._tree.blockSignals(False)
         self._sync_exclusions_from_tree()
+
+    @staticmethod
+    def _update_tristate(item: QTreeWidgetItem) -> None:
+        """Aktualisiert den Check-Zustand eines Eltern-Items basierend auf seinen Kindern."""
+        checked = 0
+        partial = 0
+        total = item.childCount()
+        for i in range(total):
+            state = item.child(i).checkState(0)
+            if state == Qt.CheckState.Checked:
+                checked += 1
+            elif state == Qt.CheckState.PartiallyChecked:
+                partial += 1
+        if checked == total:
+            item.setCheckState(0, Qt.CheckState.Checked)
+        elif checked == 0 and partial == 0:
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+        else:
+            item.setCheckState(0, Qt.CheckState.PartiallyChecked)
 
     def _sync_exclusions_from_tree(self) -> None:
         if self._selected_card_key is None:
@@ -624,6 +751,12 @@ class MainWindow(QMainWindow):
                 sid = child.data(0, Qt.ItemDataRole.UserRole)
                 if sid and child.checkState(0) == Qt.CheckState.Unchecked:
                     excluded.add(sid)
+                # Enkel scannen (Level 3, für Gruppen-Änderungen)
+                for gc_idx in range(child.childCount()):
+                    gc = child.child(gc_idx)
+                    gc_id = gc.data(0, Qt.ItemDataRole.UserRole)
+                    if gc_id and gc.checkState(0) == Qt.CheckState.Unchecked:
+                        excluded.add(gc_id)
 
         card.excluded_ids = excluded
 
@@ -708,6 +841,7 @@ class MainWindow(QMainWindow):
             photo_updates=[
                 s for s in cs.photo_updates if s["school_internal_id"] not in excluded
             ],
+            group_changes=[g for g in cs.group_changes if g["id"] not in excluded],
             total_in_source=cs.total_in_source,
             total_in_target=cs.total_in_target,
             suspend_percentage=cs.suspend_percentage,

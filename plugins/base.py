@@ -65,6 +65,24 @@ class PluginBase(ABC):
     def enrich_preview(self, changeset: ChangeSet) -> None:
         """Reichert das ChangeSet mit Preview-Daten an (z.B. generierte Emails)."""
 
+    def compute_group_diff(
+        self, all_students: list[dict], teachers: list[dict]
+    ) -> list[dict]:
+        """Berechnet geplante Gruppenänderungen (SOLL vs IST).
+
+        Wird in der Compute-Phase aufgerufen, Ergebnis wird in der Vorschau angezeigt.
+        Returns: [{id, group_type, group_name, group_id, action, member_name, member_id, class_name}]
+        """
+        return []
+
+    def apply_group_changes(self, changes: list[dict]) -> list[dict]:
+        """Führt die vom User ausgewählten Gruppenänderungen aus.
+
+        changes: Gefilterte Liste aus compute_group_diff (nur angehakte Einträge).
+        Returns: Ergebnisse [{action, group, success, message}]
+        """
+        return []
+
     def get_write_back_data(self) -> list[dict]:
         """Gibt Daten zurück die an den Adapter zurückgeschrieben werden sollen.
 

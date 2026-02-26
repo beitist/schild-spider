@@ -74,12 +74,14 @@ class PluginComputeWorker(QObject):
         plugin: PluginBase,
         students: list,
         max_suspend: float,
+        teachers: list | None = None,
     ) -> None:
         super().__init__()
         self.plugin_key = plugin_key
         self.plugin = plugin
         self.students = students
         self.max_suspend = max_suspend
+        self.teachers = teachers or []
 
     @Slot()
     def run(self) -> None:
@@ -98,6 +100,21 @@ class PluginComputeWorker(QObject):
 
                 # Vorschau-Daten anreichern (z.B. Emails vorgenerieren)
                 self.plugin.enrich_preview(cs)
+
+                # Gruppen-Diff berechnen (für Vorschau)
+                if self.students:
+                    from dataclasses import asdict
+
+                    self.log.emit("Berechne Gruppen-Diff...")
+                    student_dicts = [asdict(s) for s in self.students]
+                    teacher_dicts = [asdict(t) for t in self.teachers]
+                    cs.group_changes = self.plugin.compute_group_diff(
+                        student_dicts, teacher_dicts
+                    )
+                    if cs.group_changes:
+                        self.log.emit(
+                            f"  {len(cs.group_changes)} Gruppenänderungen geplant"
+                        )
 
                 for w in caught:
                     self.log.emit(f"⚠ {w.message}")
@@ -168,6 +185,15 @@ class PluginApplyWorker(QObject):
                     "Bitte \u00fcber 'R\u00fcckschreiben' an SchILD zur\u00fcckschreiben."
                 )
                 self.write_back_ready.emit(self.plugin_key, write_back_data)
+
+            # Gruppenänderungen anwenden (vom User in der Vorschau ausgewählt)
+            if cs.group_changes:
+                self.log.emit(f"Wende {len(cs.group_changes)} Gruppenänderungen an...")
+                sync_results = self.plugin.apply_group_changes(cs.group_changes)
+                if sync_results:
+                    ok = sum(1 for r in sync_results if r.get("success"))
+                    fail = len(sync_results) - ok
+                    self.log.emit(f"  Gruppen: {ok} OK, {fail} Fehler")
 
             self.finished.emit(self.plugin_key)
 
