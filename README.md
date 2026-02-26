@@ -15,7 +15,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 └──────────────┘    └──────────┘    └──────────────┘
  SchILD CSV/DB       Diff-Engine     Hagen-ID API
                      ChangeSet       M365 Graph
-                     Failsafes       Moodle (geplant)
+                     Failsafes       Moodle REST API
 ```
 
 ## Features
@@ -26,18 +26,20 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 - **Plugin-System** — Jedes Plugin beschreibt sich selbst (Config-Felder, Verbindungstest), die GUI rendert dynamisch
 - **Adapter-System** — Verschiedene Datenquellen (CSV-Export, DB-Zugriff) über einheitliche Schnittstelle
 - **Email-Vorschau** — Generierte Email-Adressen werden vor dem Anwenden in der Vorschau angezeigt
-- **Klassengruppen** — Automatische Erstellung von SuS- und KuK-Gruppen pro Klasse (M365)
+- **Klassengruppen** — Automatische Erstellung von SuS- und KuK-Gruppen pro Klasse (M365), Kurs-Sync (Moodle)
 - **Write-Back** — Generierte Email-Adressen können in die SchILD-DB zurückgeschrieben werden
+- **Email-Fallback-Matching** — Bestehende M365-Accounts werden per Email erkannt, auch ohne employeeId
+- **Crash-Diagnostik** — Worker-Logging in `spider.log`, nativer Crash-Traceback via `faulthandler`
 
 ## Unterstützte Systeme
 
 | Typ | System | Status |
 |-----|--------|--------|
 | Adapter | SchILD CSV-Export | Verfügbar |
-| Adapter | SchILD DB (MariaDB) | Verfügbar |
+| Adapter | SchILD DB (MariaDB/MySQL) | Verfügbar (inkl. Kurse/Fächer) |
 | Plugin | Hagen-ID (Schülerausweise) | Verfügbar |
 | Plugin | Microsoft 365 (Graph API) | Verfügbar |
-| Plugin | Moodle | Geplant |
+| Plugin | Moodle (REST API, SSO via OIDC) | Verfügbar |
 | Plugin | Untis | Geplant |
 
 ## Schnellstart
@@ -45,7 +47,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 ### Voraussetzungen
 
 - Python 3.12+
-- Abhängigkeiten: `PySide6`, `requests`, `Pillow`, `PyMySQL`
+- Abhängigkeiten: `PySide6`, `requests`, `Pillow`, `PyMySQL` (optional: `pyodbc` für MS SQL)
 
 ### Installation (Entwicklung)
 
@@ -88,9 +90,10 @@ schild-spider/
 │
 ├── core/
 │   ├── models.py            # StudentRecord, ChangeSet, ConfigField
-│   ├── engine.py            # Diff-Logik + Failsafe
+│   ├── engine.py            # Diff-Logik + Failsafe + Email-Fallback
 │   ├── email_generator.py   # Email-Erzeugung mit Transliteration
 │   ├── graph_client.py      # Microsoft Graph REST API Client
+│   ├── moodle_client.py     # Moodle Web Services REST API Client
 │   ├── paths.py             # Asset-Pfade (PyInstaller-kompatibel)
 │   └── plugin_loader.py     # Registry, Settings-Versionierung, Migration
 │
@@ -102,7 +105,8 @@ schild-spider/
 ├── plugins/
 │   ├── base.py              # PluginBase (ABC)
 │   ├── hagen_id.py          # Hagen-ID REST API
-│   └── m365.py              # Microsoft 365 / Entra ID (Graph API)
+│   ├── m365.py              # Microsoft 365 / Entra ID (Graph API)
+│   └── moodle.py            # Moodle (Web Services REST API)
 │
 ├── gui/
 │   ├── mainwindow.py        # Hauptfenster (3-Phasen-Workflow)
@@ -164,6 +168,55 @@ Falls Schüler automatisch eine Lizenz erhalten sollen (z.B. A1 for Students), b
 - Oder per Graph API: `GET /subscribedSkus`
 
 Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
+
+---
+
+## Moodle einrichten
+
+Das Moodle-Plugin legt Schüler-Accounts an (`auth=oidc` für SSO), erstellt Kategorien und Kurse pro Klasse/Fach/Lehrer und schreibt Schüler sowie Lehrer in die richtigen Kurse ein.
+
+### 1. Web Service aktivieren
+
+1. **Website-Administration** → **Server** → **Web-Services** → **Übersicht**
+2. **Web Services aktivieren** einschalten
+3. **REST-Protokoll** aktivieren
+
+### 2. Externen Service erstellen
+
+1. **Website-Administration** → **Server** → **Web-Services** → **Externe Services**
+2. **Hinzufügen** → Name: z.B. `Schild Spider`
+3. Folgende **Funktionen** hinzufügen:
+
+| Funktion | Wofür |
+|---|---|
+| `core_user_get_users` | Schüler/Lehrer suchen |
+| `core_user_get_users_by_field` | Schüler per idnumber suchen |
+| `core_user_create_users` | Schüler-Accounts anlegen |
+| `core_user_update_users` | Accounts aktualisieren/deaktivieren |
+| `core_course_get_categories` | Kategorien auflisten |
+| `core_course_create_categories` | Kategorien pro Klasse anlegen |
+| `core_course_get_courses_by_field` | Kurse per idnumber suchen |
+| `core_course_create_courses` | Kurse anlegen |
+| `enrol_manual_enrol_users` | Schüler/Lehrer in Kurse einschreiben |
+| `enrol_manual_unenrol_users` | Aus Kursen abmelden |
+| `core_enrol_get_enrolled_users` | Eingeschriebene User pro Kurs auflisten |
+| `core_webservice_get_site_info` | Verbindungstest |
+
+### 3. Token erzeugen
+
+1. **Website-Administration** → **Server** → **Web-Services** → **Token verwalten**
+2. **Token erstellen** → Service: `Schild Spider` → Admin-User auswählen
+3. Token kopieren
+
+### 4. In Schild Spider eintragen
+
+Unter **Einstellungen → Moodle**:
+- **Moodle URL** — z.B. `https://moodle.schule.de`
+- **Web Service Token** — der eben kopierte Token
+- **Eltern-Kategorie-ID** — `0` für Top-Level, oder die ID einer bestehenden Kategorie
+- **Kurs-Templates** — `{k}` = Klasse, `{f}` = Fach, `{l}` = Lehrer
+
+> **Voraussetzung:** Schüler benötigen eine Email-Adresse (z.B. nach M365-Sync + Write-Back). Schüler ohne Email werden übersprungen.
 
 ---
 
