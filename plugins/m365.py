@@ -202,7 +202,6 @@ class M365Plugin(PluginBase):
             [
                 student.get("first_name", "").lower(),
                 student.get("last_name", "").lower(),
-                student.get("dob", ""),
                 student.get("class_name", "").lower(),
                 student.get("email", "").lower(),
             ]

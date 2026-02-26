@@ -497,6 +497,10 @@ class MainWindow(QMainWindow):
         self._add_preview_group_category(
             "Lehrergruppen (KuK)", cs.group_changes, excluded, "kuk"
         )
+        self._add_preview_group_category(
+            "Kategorien", cs.group_changes, excluded, "category"
+        )
+        self._add_preview_group_category("Kurse", cs.group_changes, excluded, "course")
 
         if not (
             cs.new or cs.changed or cs.suspended or cs.photo_updates or cs.group_changes
@@ -641,7 +645,11 @@ class MainWindow(QMainWindow):
                 child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 child.setData(0, Qt.ItemDataRole.UserRole, c["id"])
 
-                if c["action"] == "create_group":
+                if "display_text" in c:
+                    child.setText(0, c["display_text"])
+                    if c.get("display_detail"):
+                        child.setText(1, c["display_detail"])
+                elif c["action"] == "create_group":
                     child.setText(0, "Gruppe anlegen")
                 elif c["action"] == "add_member":
                     child.setText(0, f"{c['member_name']}")
