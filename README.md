@@ -4,9 +4,11 @@
 
 # Schild Spider
 
-Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **SchILD NRW** und angebundenen Zielsystemen.
+Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **SchILD NRW 2** und angebundenen Zielsystemen.
 
 > **Public Beta** — Dieses Projekt befindet sich in aktiver Entwicklung. Funktionen können unvollständig sein oder sich ändern. Nutzung auf eigene Verantwortung. Feedback, Fehlerberichte und Feature-Wünsche sind willkommen — einfach ein [Issue](https://github.com/beitist/schild-spider/issues) erstellen oder melden!
+>
+> **Kompatibilität:** Entwickelt und getestet mit **SchILD 2** (MariaDB/MySQL). SchILD 3 ist bisher nicht getestet — Unterstützung ist möglich, aber nicht garantiert.
 
 ```
 ┌──────────────┐    ┌──────────┐    ┌──────────────┐
