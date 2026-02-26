@@ -159,24 +159,23 @@ class GraphClient:
     )
 
     def list_users(self, domain: str) -> list[dict]:
-        """Listet alle User einer Domain auf (client-seitig gefiltert)."""
-        domain_suffix = f"@{domain}".lower()
-        all_users = self._request_paged(
+        """Listet alle User einer Domain auf (serverseitig gefiltert).
+
+        Nutzt $filter=endsWith (advanced query) statt alle User zu laden.
+        Benötigt ConsistencyLevel: eventual (bereits in _request gesetzt)
+        und $count=true als Handshake für advanced queries.
+        """
+        domain_suffix = f"@{domain}"
+        users = self._request_paged(
             "/users",
-            params={"$select": self._USER_SELECT},
+            params={
+                "$select": self._USER_SELECT,
+                "$filter": f"endsWith(userPrincipalName,'{domain_suffix}')",
+                "$count": "true",
+            },
         )
-        filtered = [
-            u
-            for u in all_users
-            if u.get("userPrincipalName", "").lower().endswith(domain_suffix)
-        ]
-        log.debug(
-            "list_users: %d von %d mit Domain @%s",
-            len(filtered),
-            len(all_users),
-            domain,
-        )
-        return filtered
+        log.debug("list_users: %d mit Domain %s", len(users), domain_suffix)
+        return users
 
     def create_user(self, user_data: dict) -> dict:
         """Legt einen neuen User an."""
@@ -229,17 +228,38 @@ class GraphClient:
     # --- Gruppen ---
 
     def list_groups(self, prefix: str) -> list[dict]:
-        """Listet Gruppen die mit prefix beginnen (client-seitig gefiltert)."""
-        all_groups = self._request_paged(
+        """Listet Gruppen die mit prefix beginnen (serverseitig gefiltert).
+
+        Nutzt $filter=startsWith (advanced query) statt alle Gruppen zu laden.
+        """
+        safe_prefix = prefix.replace("'", "''")
+        return self._request_paged(
+            "/groups",
+            params={
+                "$select": "id,displayName,mailNickname,mail",
+                "$filter": f"startsWith(displayName,'{safe_prefix}')",
+                "$count": "true",
+            },
+        )
+
+    def find_group_by_name(self, display_name: str) -> dict | None:
+        """Sucht eine Gruppe per exaktem displayName (einfacher Gleichheitsfilter)."""
+        safe_name = display_name.replace("'", "''")
+        results = self._request_paged(
+            "/groups",
+            params={
+                "$select": "id,displayName,mailNickname,mail",
+                "$filter": f"displayName eq '{safe_name}'",
+            },
+        )
+        return results[0] if results else None
+
+    def list_all_groups(self) -> list[dict]:
+        """Listet ALLE Gruppen im Tenant (für client-seitige Filterung)."""
+        return self._request_paged(
             "/groups",
             params={"$select": "id,displayName,mailNickname,mail"},
         )
-        prefix_lower = prefix.lower()
-        return [
-            g
-            for g in all_groups
-            if g.get("displayName", "").lower().startswith(prefix_lower)
-        ]
 
     def create_group(self, group_data: dict) -> dict:
         """Erstellt eine neue Gruppe."""

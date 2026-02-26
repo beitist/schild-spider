@@ -48,6 +48,7 @@ class M365Plugin(PluginBase):
         self._generated_emails: list[dict] = []  # für Write-back
         self._existing_emails: set[str] = set()  # gecached aus get_manifest
         self._all_users: list[dict] | None = None  # gecached für Lehrer-Suche
+        self._groups_bulk_loaded: bool = False  # Gruppen-Cache komplett?
 
     # --- Metadaten ---
 
@@ -178,23 +179,36 @@ class M365Plugin(PluginBase):
         self._all_users = users
 
         manifest: list[dict] = []
+        # Email-Fallback: User ohne employeeId per Email matchen
+        self._email_manifest: dict[str, dict] = {}
+
         for u in users:
             eid = u.get("employeeId")
-            if not eid:
-                continue
+            upn = (u.get("userPrincipalName") or "").lower()
             student_dict = {
                 "first_name": u.get("givenName", ""),
                 "last_name": u.get("surname", ""),
                 "class_name": u.get("department", ""),
                 "email": u.get("userPrincipalName", ""),
             }
-            manifest.append(
-                {
-                    "school_internal_id": eid,
-                    "data_hash": self.compute_data_hash(student_dict),
-                    "is_active": u.get("accountEnabled", True),
+            data_hash = self.compute_data_hash(student_dict)
+            is_active = u.get("accountEnabled", True)
+
+            if eid:
+                manifest.append(
+                    {
+                        "school_internal_id": eid,
+                        "data_hash": data_hash,
+                        "is_active": is_active,
+                    }
+                )
+            elif upn:
+                # Kein employeeId → per Email matchbar (Fallback für Engine)
+                self._email_manifest[upn] = {
+                    "school_internal_id": "",
+                    "data_hash": data_hash,
+                    "is_active": is_active,
                 }
-            )
         return manifest
 
     def compute_data_hash(self, student: dict) -> str:
@@ -267,6 +281,30 @@ class M365Plugin(PluginBase):
 
                 existing_emails.add(email.lower())
 
+                # Prüfen ob User per Email schon existiert (ohne employeeId)
+                existing_user = self._graph.find_user_by_upn(email)
+                if existing_user:
+                    user_id = existing_user["id"]
+                    self._graph.update_user(
+                        user_id,
+                        {
+                            "employeeId": sid,
+                            "department": student.get("class_name", ""),
+                            "displayName": self._format_display_name(student),
+                        },
+                    )
+                    self._assign_to_class_group(
+                        user_id, student.get("class_name", ""), student
+                    )
+                    results.append(
+                        {
+                            "school_internal_id": sid,
+                            "success": True,
+                            "message": f"Verknüpft: {email}",
+                        }
+                    )
+                    continue
+
                 user_data = {
                     "accountEnabled": True,
                     "displayName": self._format_display_name(student),
@@ -318,6 +356,11 @@ class M365Plugin(PluginBase):
             try:
                 user = self._graph.find_user_by_employee_id(sid)
                 if not user:
+                    # Fallback: per Email suchen (User ohne employeeId)
+                    email = (student.get("email") or "").strip()
+                    if email:
+                        user = self._graph.find_user_by_upn(email)
+                if not user:
                     results.append(
                         {
                             "school_internal_id": sid,
@@ -329,6 +372,10 @@ class M365Plugin(PluginBase):
 
                 user_id = user["id"]
                 updates: dict = {}
+
+                # employeeId nachsetzen falls fehlend
+                if not user.get("employeeId"):
+                    updates["employeeId"] = sid
 
                 if student.get("first_name") and student["first_name"] != user.get(
                     "givenName", ""
@@ -426,12 +473,11 @@ class M365Plugin(PluginBase):
         nickname = template.replace("{k}", sanitized)
         display_name = nickname  # z.B. "10a_sus"
 
-        # Existierende Gruppe suchen
-        groups = self._graph.list_groups(nickname)
-        for g in groups:
-            if g.get("displayName") == display_name:
-                cache[cache_key] = g["id"]
-                return g["id"]
+        # Existierende Gruppe suchen (serverseitiger Filter)
+        found = self._graph.find_group_by_name(display_name)
+        if found:
+            cache[cache_key] = found["id"]
+            return found["id"]
 
         # Neue Gruppe erstellen
         try:
@@ -535,11 +581,12 @@ class M365Plugin(PluginBase):
     # --- Gruppen-Sync (Compute + Apply getrennt für Preview) ---
 
     def _build_lookups(self) -> None:
-        """Baut Lookup-Dicts für Schüler (employeeId) und Lehrer (Nachname)."""
+        """Baut Lookup-Dicts für Schüler (employeeId/Email) und Lehrer (Nachname)."""
         if self._all_users is None:
             self._all_users = self._graph.list_users(self._domain)
 
         self._eid_to_uid: dict[str, str] = {}
+        self._upn_to_uid: dict[str, str] = {}
         self._uid_to_name: dict[str, str] = {}
         for u in self._all_users:
             uid = u["id"]
@@ -547,6 +594,9 @@ class M365Plugin(PluginBase):
             eid = u.get("employeeId")
             if eid:
                 self._eid_to_uid[eid] = uid
+            upn = (u.get("userPrincipalName") or "").lower()
+            if upn:
+                self._upn_to_uid[upn] = uid
 
         self._surname_to_uid: dict[str, str] = {}
         for u in self._all_users:
@@ -565,17 +615,83 @@ class M365Plugin(PluginBase):
         if cache_key in cache:
             return cache[cache_key], False
 
-        sanitized = _sanitize_nickname(class_name)
-        nickname = template.replace("{k}", sanitized)
-        display_name = nickname
+        # Wenn Gruppen bulk-geladen: Cache-Miss = Gruppe existiert nicht
+        if self._groups_bulk_loaded:
+            return None, True
 
-        groups = self._graph.list_groups(nickname)
-        for g in groups:
-            if g.get("displayName") == display_name:
-                cache[cache_key] = g["id"]
-                return g["id"], False
+        # Fallback: einzelne Abfrage (nur wenn kein Bulk-Load)
+        sanitized = _sanitize_nickname(class_name)
+        display_name = template.replace("{k}", sanitized)
+
+        found = self._graph.find_group_by_name(display_name)
+        if found:
+            cache[cache_key] = found["id"]
+            return found["id"], False
 
         return None, True  # Gruppe existiert nicht → is_new=True
+
+    def _bulk_load_groups(self, class_names: set[str]) -> None:
+        """Lädt alle relevanten Gruppen in einem Durchgang (statt pro Klasse).
+
+        Extrahiert Prefix/Suffix aus den Templates und nutzt serverseitige
+        Filter (startsWith) oder lädt alle Gruppen einmal und filtert lokal.
+        """
+        self._groups_bulk_loaded = False
+        sus_prefix, sus_suffix = _extract_template_parts(self._group_sus_template)
+        kuk_prefix, kuk_suffix = _extract_template_parts(self._group_kuk_template)
+
+        all_groups: list[dict] = []
+
+        if sus_prefix or kuk_prefix:
+            # Serverseitig per startsWith filtern
+            loaded_prefixes: set[str] = set()
+            for prefix in (sus_prefix, kuk_prefix):
+                if prefix and prefix not in loaded_prefixes:
+                    all_groups.extend(self._graph.list_groups(prefix))
+                    loaded_prefixes.add(prefix)
+        elif sus_suffix or kuk_suffix:
+            # Kein Prefix → alle Gruppen laden, client-seitig filtern
+            all_groups = self._graph.list_all_groups()
+            # Nur Gruppen behalten die zum Suffix passen
+            filtered: list[dict] = []
+            for g in all_groups:
+                dn = (g.get("displayName") or "").lower()
+                if sus_suffix and dn.endswith(sus_suffix.lower()):
+                    filtered.append(g)
+                elif kuk_suffix and dn.endswith(kuk_suffix.lower()):
+                    filtered.append(g)
+            all_groups = filtered
+        else:
+            # Template ist nur {k} → Warnung, Fallback auf Einzel-Abfragen
+            warnings.warn(
+                "Gruppen-Templates haben keinen Prefix/Suffix "
+                "(z.B. '{k}_sus'). Lade Gruppen einzeln pro Klasse — "
+                "das erzeugt mehr API-Abfragen."
+            )
+            return
+
+        # displayName → group_id Lookup bauen
+        name_to_id: dict[str, str] = {}
+        for g in all_groups:
+            dn = g.get("displayName", "")
+            if dn:
+                name_to_id[dn.lower()] = g["id"]
+
+        # SuS- und KuK-Caches vorbelegen
+        for class_name in class_names:
+            sanitized = _sanitize_nickname(class_name)
+
+            sus_name = self._group_sus_template.replace("{k}", sanitized)
+            gid = name_to_id.get(sus_name.lower())
+            if gid:
+                self._sus_cache[f"{self._group_sus_template}|{class_name}"] = gid
+
+            kuk_name = self._group_kuk_template.replace("{k}", sanitized)
+            gid = name_to_id.get(kuk_name.lower())
+            if gid:
+                self._kuk_cache[f"{self._group_kuk_template}|{class_name}"] = gid
+
+        self._groups_bulk_loaded = True
 
     def compute_group_diff(
         self, all_students: list[dict], teachers: list[dict]
@@ -589,6 +705,9 @@ class M365Plugin(PluginBase):
             cn = s.get("class_name", "")
             if cn:
                 classes.setdefault(cn, []).append(s)
+
+        # Gruppen einmal bulk-laden statt pro Klasse
+        self._bulk_load_groups(set(classes.keys()))
 
         changes: list[dict] = []
         for class_name, class_students in sorted(classes.items()):
@@ -620,10 +739,14 @@ class M365Plugin(PluginBase):
                 }
             )
 
-        # SOLL: aktive Schüler dieser Klasse
+        # SOLL: aktive Schüler dieser Klasse (employeeId → Fallback Email)
         expected_ids: set[str] = set()
         for s in students:
             uid = self._eid_to_uid.get(s.get("school_internal_id", ""))
+            if not uid:
+                email = (s.get("email") or "").lower()
+                if email:
+                    uid = self._upn_to_uid.get(email)
             if uid:
                 expected_ids.add(uid)
 
@@ -834,6 +957,19 @@ class M365Plugin(PluginBase):
 def _sanitize_nickname(text: str) -> str:
     """Bereinigt einen Klassennamen für mailNickname (a-z, 0-9, -, _)."""
     return re.sub(r"[^a-z0-9_\-]", "", text.lower())
+
+
+def _extract_template_parts(template: str) -> tuple[str, str]:
+    """Extrahiert Prefix und Suffix aus einem Gruppen-Template.
+
+    '{k}_sus' → ('', '_sus')
+    'grp_{k}' → ('grp_', '')
+    '{k}'     → ('', '')
+    """
+    idx = template.find("{k}")
+    if idx < 0:
+        return template, ""
+    return template[:idx], template[idx + 3 :]
 
 
 def _generate_password(length: int = 16) -> str:

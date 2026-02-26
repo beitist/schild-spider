@@ -24,6 +24,15 @@ def compute_changeset(
     manifest = plugin.get_manifest()
     target_map: dict[str, dict] = {s["school_internal_id"]: s for s in manifest}
 
+    # Sekundäres Matching per Email (z.B. M365-User ohne employeeId)
+    email_manifest: dict[str, dict] = getattr(plugin, "_email_manifest", {})
+    if email_manifest:
+        for sid, student in source_map.items():
+            if sid not in target_map:
+                email = (student.get("email") or "").lower()
+                if email and email in email_manifest:
+                    target_map[sid] = email_manifest[email]
+
     new: list[dict] = []
     changed: list[dict] = []
     photo_updates: list[dict] = []
