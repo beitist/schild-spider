@@ -35,6 +35,10 @@ class GraphClient:
         self._client_id = client_id
         self._client_secret = client_secret
         self._session = requests.Session()
+        # Keep-Alive deaktivieren — jede Request nutzt eine frische SSL-Connection.
+        # Verhindert Access Violations durch SSL Connection Reuse, die auf Windows
+        # mit PyInstaller's gebundeltem OpenSSL auftreten können.
+        self._session.headers["Connection"] = "close"
         self._token: str = ""
         self._token_expires: float = 0.0
 
