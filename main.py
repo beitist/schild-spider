@@ -1,7 +1,10 @@
 """Schild Spider — Startpunkt der Anwendung."""
 
+import atexit
 import faulthandler
 import logging
+import logging.handlers
+import queue
 import sys
 import threading
 from pathlib import Path
@@ -15,7 +18,7 @@ from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
 APP_NAME = "Schild Spider"
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.4.5"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
 
@@ -77,24 +80,49 @@ def _build_splash_pixmap() -> QPixmap | None:
 
 
 def _setup_logging() -> None:
-    """Konfiguriert Logging: immer in spider.log, bei Console auch auf stdout."""
+    """Konfiguriert Logging mit QueueHandler für Thread-Sicherheit.
+
+    Worker-Threads schreiben Log-Records nur in eine Queue (kein File-I/O).
+    Ein QueueListener im Main-Thread schreibt sie dann auf Datei/Console.
+    Das verhindert Cross-Thread flush()-Aufrufe, die auf Windows mit
+    PySide6+PyInstaller zu Heap Corruption führen können.
+    """
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(log_format, datefmt=date_format)
 
-    # Datei-Handler: spider.log im Arbeitsverzeichnis (überschreibt beim Start)
+    # Eigentliche Handler (werden nur vom QueueListener-Thread bedient)
     file_handler = logging.FileHandler("spider.log", mode="w", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    file_handler.setFormatter(formatter)
 
-    # Stream-Handler: stdout (nützlich bei Entwicklung, leer bei --windowed)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(logging.DEBUG)
-    stream_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    handlers: list[logging.Handler] = [file_handler]
+
+    # Stream-Handler nur wenn stderr verfügbar (PyInstaller --windowed setzt es auf None)
+    if sys.stderr is not None:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setFormatter(formatter)
+        handlers.append(stream_handler)
+
+    # Queue + Listener: alle Log-Records laufen über die Queue,
+    # nur der Listener-Thread macht tatsächlich File-I/O.
+    log_queue: queue.Queue = queue.Queue(-1)
+    queue_handler = logging.handlers.QueueHandler(log_queue)
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
-    root.addHandler(file_handler)
-    root.addHandler(stream_handler)
+    root.addHandler(queue_handler)
+
+    listener = logging.handlers.QueueListener(
+        log_queue, *handlers, respect_handler_level=True
+    )
+    listener.start()
+    atexit.register(listener.stop)
+
+    # Third-Party-Logger drosseln — urllib3 erzeugt bei API-Pagination massiv
+    # DEBUG-Output (jede Connection, jeder Request), das ist nur Noise.
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     # faulthandler: schreibt nativen Crash-Traceback (Segfault etc.) in eigene Datei.
     # File-Handle wird als Attribut gespeichert damit er nicht vom GC geschlossen wird.
