@@ -18,7 +18,7 @@ from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
 APP_NAME = "Schild Spider"
-APP_VERSION = "0.4.5"
+APP_VERSION = "0.4.8"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
 
