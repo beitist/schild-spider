@@ -49,6 +49,8 @@ class M365Plugin(PluginBase):
         self._existing_emails: set[str] = set()  # gecached aus get_manifest
         self._all_users: list[dict] | None = None  # gecached für Lehrer-Suche
         self._groups_bulk_loaded: bool = False  # Gruppen-Cache komplett?
+        # Lehrer-Matching: Nachname → Email (aus SchILD-Lehrerliste)
+        self._teacher_name_to_email: dict[str, str] = {}
 
     # --- Metadaten ---
 
@@ -540,23 +542,22 @@ class M365Plugin(PluginBase):
     def _add_teacher_to_group(
         self, group_id: str, teacher_name: str, *, as_owner: bool
     ) -> None:
-        """Sucht den Lehrer per Nachname und fügt ihn zur Gruppe hinzu."""
+        """Sucht den Lehrer per Email (aus SchILD) und fügt ihn zur Gruppe hinzu."""
+        email = self._teacher_name_to_email.get(teacher_name.strip().lower())
+        if not email:
+            return  # Kein Email → Warnung kam bereits in compute_group_diff
+        uid = self._upn_to_uid.get(email)
+        if not uid:
+            warnings.warn(f"Lehrer {teacher_name} ({email}): kein M365-User gefunden")
+            return
         try:
-            users = self._all_users or self._graph.list_users(self._domain)
-            for u in users:
-                surname = u.get("surname", "")
-                if surname and surname.lower() == teacher_name.lower():
-                    try:
-                        if as_owner:
-                            self._graph.add_owner(group_id, u["id"])
-                        else:
-                            self._graph.add_member(group_id, u["id"])
-                    except GraphApiError as exc:
-                        if "already exist" not in str(exc).lower():
-                            warnings.warn(f"Lehrer {teacher_name}: {exc}")
-                    return
-        except Exception:
-            pass
+            if as_owner:
+                self._graph.add_owner(group_id, uid)
+            else:
+                self._graph.add_member(group_id, uid)
+        except GraphApiError as exc:
+            if "already exist" not in str(exc).lower():
+                warnings.warn(f"Lehrer {teacher_name}: {exc}")
 
     def _move_between_groups(
         self, user_id: str, old_class: str, new_class: str, student: dict
@@ -602,12 +603,6 @@ class M365Plugin(PluginBase):
             upn = (u.get("userPrincipalName") or "").lower()
             if upn:
                 self._upn_to_uid[upn] = uid
-
-        self._surname_to_uid: dict[str, str] = {}
-        for u in self._all_users:
-            surname = (u.get("surname") or "").strip().lower()
-            if surname and surname not in self._surname_to_uid:
-                self._surname_to_uid[surname] = u["id"]
 
     def _find_group(
         self, class_name: str, template: str, cache: dict[str, str]
@@ -703,6 +698,28 @@ class M365Plugin(PluginBase):
     ) -> list[dict]:
         """Berechnet geplante Gruppenänderungen (SOLL vs IST) für die Vorschau."""
         self._build_lookups()
+
+        # Lehrer-Matching: Nachname → Email aus SchILD-Lehrerliste.
+        # Damit werden Lehrer per Email in M365 identifiziert statt per Nachname,
+        # was Kollisionen mit gleichnamigen Schülern verhindert.
+        self._teacher_name_to_email = {}
+        no_email: list[str] = []
+        for t in teachers:
+            name = (t.get("last_name") or "").strip().lower()
+            email = (t.get("email") or "").strip().lower()
+            if not name:
+                continue
+            if not email:
+                no_email.append(t.get("last_name", "?"))
+                continue
+            if name not in self._teacher_name_to_email:
+                self._teacher_name_to_email[name] = email
+        if no_email:
+            warnings.warn(
+                f"Lehrer ohne Email in SchILD ({len(no_email)}): "
+                f"{', '.join(sorted(set(no_email)))} — "
+                f"können nicht in M365-Gruppen aufgenommen werden."
+            )
 
         # Schüler nach Klasse gruppieren
         classes: dict[str, list[dict]] = {}
@@ -832,7 +849,10 @@ class M365Plugin(PluginBase):
 
         expected_ids: set[str] = set()
         for name in expected_teacher_names:
-            uid = self._surname_to_uid.get(name)
+            email = self._teacher_name_to_email.get(name)
+            if not email:
+                continue
+            uid = self._upn_to_uid.get(email)
             if uid:
                 expected_ids.add(uid)
 

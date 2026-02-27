@@ -38,6 +38,7 @@ class TeacherRecord:
     last_name: str
     dob: str  # YYYY-MM-DD
     job_title: str = ""  # Amtsbezeichnung (optional)
+    email: str = ""  # Dienstliche Email (für Matching in Zielsystemen)
 
     @property
     def composite_key(self) -> str:

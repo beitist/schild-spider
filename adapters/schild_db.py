@@ -64,7 +64,8 @@ _SQL_TEACHERS = """
         kl.Vorname            AS first_name,
         kl.Nachname           AS last_name,
         kl.Geburtsdatum       AS dob,
-        kl.Amtsbezeichnung    AS job_title
+        kl.Amtsbezeichnung    AS job_title,
+        kl.EMailDienstlich    AS email
     FROM k_lehrer kl
     WHERE kl.Sichtbar = '+'
     ORDER BY kl.Nachname, kl.Vorname
@@ -296,6 +297,7 @@ class SchildDbAdapter(AdapterBase):
                     last_name=last_name,
                     dob=dob,
                     job_title=(raw.get("job_title") or "").strip(),
+                    email=(raw.get("email") or "").strip(),
                 )
             )
 
