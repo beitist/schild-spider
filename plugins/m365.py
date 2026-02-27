@@ -175,7 +175,9 @@ class M365Plugin(PluginBase):
     def get_manifest(self) -> list[dict]:
         users = self._graph.list_users(self._domain)
         # Email-Cache für enrich_preview und apply_new
-        self._existing_emails = {u.get("userPrincipalName", "").lower() for u in users}
+        self._existing_emails = {
+            (u.get("userPrincipalName") or "").lower() for u in users
+        }
         self._all_users = users
 
         manifest: list[dict] = []
@@ -186,10 +188,10 @@ class M365Plugin(PluginBase):
             eid = u.get("employeeId")
             upn = (u.get("userPrincipalName") or "").lower()
             student_dict = {
-                "first_name": u.get("givenName", ""),
-                "last_name": u.get("surname", ""),
-                "class_name": u.get("department", ""),
-                "email": u.get("userPrincipalName", ""),
+                "first_name": u.get("givenName") or "",
+                "last_name": u.get("surname") or "",
+                "class_name": u.get("department") or "",
+                "email": u.get("userPrincipalName") or "",
             }
             data_hash = self.compute_data_hash(student_dict)
             is_active = u.get("accountEnabled", True)
@@ -214,10 +216,10 @@ class M365Plugin(PluginBase):
     def compute_data_hash(self, student: dict) -> str:
         parts = "|".join(
             [
-                student.get("first_name", "").lower(),
-                student.get("last_name", "").lower(),
-                student.get("class_name", "").lower(),
-                student.get("email", "").lower(),
+                (student.get("first_name") or "").lower(),
+                (student.get("last_name") or "").lower(),
+                (student.get("class_name") or "").lower(),
+                (student.get("email") or "").lower(),
             ]
         )
         return hashlib.sha256(parts.encode()).hexdigest()
@@ -391,7 +393,10 @@ class M365Plugin(PluginBase):
                     updates["department"] = student["class_name"]
 
                 email = (student.get("email") or "").strip()
-                if email and email.lower() != user.get("userPrincipalName", "").lower():
+                if (
+                    email
+                    and email.lower() != (user.get("userPrincipalName") or "").lower()
+                ):
                     updates["userPrincipalName"] = email
                     updates["mailNickname"] = email.split("@")[0]
 
@@ -574,7 +579,7 @@ class M365Plugin(PluginBase):
         """Sammelt alle existierenden Email-Adressen aus M365."""
         try:
             users = self._graph.list_users(self._domain)
-            return {u.get("userPrincipalName", "").lower() for u in users}
+            return {(u.get("userPrincipalName") or "").lower() for u in users}
         except GraphApiError:
             return set()
 
