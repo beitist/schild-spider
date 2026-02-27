@@ -160,6 +160,25 @@ class MoodleClient:
         """Erstellt Kurse. Returns: Liste mit {id, shortname}."""
         return self._call("core_course_create_courses", courses=courses)
 
+    def duplicate_course(
+        self,
+        course_id: int,
+        fullname: str,
+        shortname: str,
+        category_id: int,
+        idnumber: str = "",
+    ) -> dict:
+        """Dupliziert einen bestehenden Kurs (Inhalte + Struktur)."""
+        return self._call(
+            "core_course_duplicate_course",
+            courseid=course_id,
+            fullname=fullname,
+            shortname=shortname,
+            categoryid=category_id,
+            idnumber=idnumber,
+            visible=1,
+        )
+
     # --- Einschreibungen ---
 
     def get_enrolled_users(self, course_id: int) -> list[dict]:

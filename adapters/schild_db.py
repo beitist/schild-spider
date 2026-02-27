@@ -51,11 +51,14 @@ _SQL_COURSES = """
         la.Schueler_ID        AS student_id,
         f.Zeugnisbez          AS course_name,
         kl.Nachname           AS teacher_name,
-        ld.Kurs_ID            AS course_id
+        ld.Kurs_ID            AS course_id,
+        ku.Bezeichnung        AS kurs_bezeichnung,
+        ld.KursartAllg        AS kursart
     FROM schuelerleistungsdaten ld
     JOIN schuelerlernabschnittsdaten la ON ld.Abschnitt_ID = la.ID
     LEFT JOIN eigeneschule_faecher f ON ld.Fach_ID = f.ID
     LEFT JOIN k_lehrer kl ON ld.FachLehrer = kl.Kuerzel
+    LEFT JOIN Kurse ku ON ld.Kurs_ID = ku.ID
     WHERE la.Jahr = %s AND la.Abschnitt = %s
 """
 
@@ -231,6 +234,8 @@ class SchildDbAdapter(AdapterBase):
                 course_name=c.get("course_name", "") or "",
                 teacher_name=c.get("teacher_name", "") or "",
                 course_id=str(c.get("course_id", "") or ""),
+                kurs_bezeichnung=c.get("kurs_bezeichnung", "") or "",
+                kursart=c.get("kursart", "") or "",
             )
             courses_by_student.setdefault(sid, []).append(assignment)
 

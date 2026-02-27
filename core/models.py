@@ -9,7 +9,9 @@ class CourseAssignment:
 
     course_name: str  # Fachbezeichnung (z.B. "Mathematik")
     teacher_name: str  # Fachlehrkraft (z.B. "Müller")
-    course_id: str = ""  # Optionale Kurs-ID
+    course_id: str = ""  # Optionale Kurs-ID (SchILD Kurs_ID)
+    kurs_bezeichnung: str = ""  # Kursbezeichnung aus Kurse-Tabelle
+    kursart: str = ""  # KursartAllg (GK, LK, etc.)
 
 
 @dataclass

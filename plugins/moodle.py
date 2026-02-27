@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import warnings
 
 from core.moodle_client import MoodleApiError, MoodleClient
 from core.models import ConfigField
 from plugins.base import PluginBase
+
+log = logging.getLogger(__name__)
 
 
 class MoodlePlugin(PluginBase):
@@ -36,7 +39,8 @@ class MoodlePlugin(PluginBase):
         # Caches (pro Lauf)
         self._all_moodle_users: list[dict] | None = None
         self._idnumber_to_user: dict[str, dict] = {}
-        self._surname_to_user: dict[str, dict] = {}
+        self._email_to_user: dict[str, dict] = {}
+        self._teacher_name_to_email: dict[str, str] = {}
         self._category_cache: dict[str, int] = {}  # name → id
         self._course_cache: dict[str, dict] = {}  # idnumber → course
 
@@ -152,14 +156,18 @@ class MoodlePlugin(PluginBase):
             )
 
         self._idnumber_to_user = {}
-        self._surname_to_user = {}
+        self._email_to_user: dict[str, dict] = {}
         for u in self._all_moodle_users:
             idnum = (u.get("idnumber") or "").strip()
             if idnum:
                 self._idnumber_to_user[idnum] = u
-            surname = (u.get("lastname") or "").strip().lower()
-            if surname and surname not in self._surname_to_user:
-                self._surname_to_user[surname] = u
+            # Email + Username für Lehrer-Lookup (Email-basiert)
+            email = (u.get("email") or "").strip().lower()
+            if email:
+                self._email_to_user[email] = u
+            username = (u.get("username") or "").strip().lower()
+            if username and username not in self._email_to_user:
+                self._email_to_user[username] = u
 
     def _load_categories(self) -> None:
         """Lädt Kategorien und baut name→id Cache."""
@@ -372,14 +380,43 @@ class MoodlePlugin(PluginBase):
     def compute_group_diff(
         self, all_students: list[dict], teachers: list[dict]
     ) -> list[dict]:
-        """Berechnet geplante Kurs-/Einschreibungsänderungen (SOLL vs IST)."""
+        """Berechnet geplante Kurs-/Einschreibungsänderungen (SOLL vs IST).
+
+        Kurs-Aggregation: SchILD-Kurs (Kurs_ID) schlägt Fach.
+        Wenn Kurs_ID gesetzt → klassenübergreifend nach Kurs aggregieren.
+        Wenn nicht → pro Klasse nach Fach+Lehrer (wie bisher).
+        """
         self._load_users()
         self._load_categories()
 
         changes: list[dict] = []
 
-        # Kurse aus Schüler-Daten sammeln: {(klasse, fach, lehrer) → [schüler_ids]}
-        course_map: dict[tuple[str, str, str], set[str]] = {}
+        # --- LuL-Mapping aufbauen (Nachname → Email, analog M365) ---
+        self._teacher_name_to_email = {}
+        no_email: list[str] = []
+        for t in teachers:
+            job_title = (t.get("job_title") or "").strip()
+            if not job_title:
+                continue  # Ohne Amtsbezeichnung → kein Lehrer
+            name = (t.get("last_name") or "").strip().lower()
+            email = (t.get("email") or "").strip().lower()
+            if not name:
+                continue
+            if not email:
+                no_email.append(t.get("last_name", "?"))
+                continue
+            if name not in self._teacher_name_to_email:
+                self._teacher_name_to_email[name] = email
+
+        if no_email:
+            log.warning("Lehrer ohne Email: %s", ", ".join(no_email))
+        log.info("LuL-Mapping: %d Lehrer mit Email", len(self._teacher_name_to_email))
+
+        # --- Kurse aus Schüler-Daten sammeln ---
+        # Key: ("kurs", kurs_id) oder ("fach", klasse, fach, lehrer)
+        course_map: dict[tuple, set[str]] = {}
+        course_meta: dict[tuple, dict] = {}
+
         for s in all_students:
             class_name = s.get("class_name", "")
             sid = s.get("school_internal_id", "")
@@ -389,20 +426,47 @@ class MoodlePlugin(PluginBase):
                 if isinstance(course, dict):
                     c_name = course.get("course_name", "")
                     t_name = course.get("teacher_name", "")
+                    c_id = course.get("course_id", "")
+                    kurs_bez = course.get("kurs_bezeichnung", "")
+                    kursart = course.get("kursart", "")
                 else:
                     c_name = course.course_name
                     t_name = course.teacher_name
-                if c_name and t_name:
-                    key = (class_name, c_name, t_name)
-                    course_map.setdefault(key, set()).add(sid)
+                    c_id = course.course_id
+                    kurs_bez = getattr(course, "kurs_bezeichnung", "")
+                    kursart = getattr(course, "kursart", "")
+
+                if not c_name or not t_name:
+                    continue
+
+                if c_id:
+                    # Kurs-basiert: klassenübergreifend
+                    key = ("kurs", c_id)
+                    display_name = kurs_bez or c_name
+                    if kursart:
+                        display_name = f"{display_name} {kursart}"
+                else:
+                    # Fach-basiert: pro Klasse
+                    key = ("fach", class_name, c_name, t_name)
+                    display_name = c_name
+
+                course_map.setdefault(key, set()).add(sid)
+                if key not in course_meta:
+                    course_meta[key] = {
+                        "display_name": display_name,
+                        "teacher_name": t_name,
+                        "classes": set(),
+                    }
+                course_meta[key]["classes"].add(class_name)
 
         if not course_map:
             return changes
 
-        # Klassen sammeln für Kategorie-Check
-        classes_needed: set[str] = {k[0] for k in course_map}
+        # --- Klassen sammeln für Kategorie-Check ---
+        classes_needed: set[str] = set()
+        for meta in course_meta.values():
+            classes_needed.update(meta["classes"])
 
-        # Kategorie-Änderungen
         for class_name in sorted(classes_needed):
             if class_name not in self._category_cache:
                 changes.append(
@@ -421,16 +485,32 @@ class MoodlePlugin(PluginBase):
                     }
                 )
 
-        # Kurs- und Einschreibungs-Änderungen
-        for (class_name, course_name, teacher_name), student_ids in sorted(
-            course_map.items()
-        ):
-            idnumber = self._make_idnumber(class_name, course_name, teacher_name)
+        # --- Kurs- und Einschreibungs-Änderungen ---
+        for key, student_ids in sorted(course_map.items()):
+            meta = course_meta[key]
+            teacher_name = meta["teacher_name"]
+            display_name = meta["display_name"]
+
+            if key[0] == "kurs":
+                # Kurs-basiert: idnumber aus Kurs_ID
+                idnumber = f"kurs-{key[1]}"
+                class_for_template = "/".join(sorted(meta["classes"]))
+                # Kategorie: Parent-Kategorie (verfeinern mit Hierarchie später)
+                category_name = sorted(meta["classes"])[0]
+            else:
+                # Fach-basiert: wie bisher
+                _, class_for_template, fach_name, _ = key
+                display_name = fach_name
+                idnumber = self._make_idnumber(
+                    class_for_template, fach_name, teacher_name
+                )
+                category_name = class_for_template
+
             shortname = self._format_course_name(
-                self._shortname_tpl, class_name, course_name, teacher_name
+                self._shortname_tpl, class_for_template, display_name, teacher_name
             )
             fullname = self._format_course_name(
-                self._fullname_tpl, class_name, course_name, teacher_name
+                self._fullname_tpl, class_for_template, display_name, teacher_name
             )
 
             # Kurs in Moodle suchen
@@ -445,10 +525,9 @@ class MoodlePlugin(PluginBase):
                     pass
 
             course_id = existing_course["id"] if existing_course else None
-            category_id = self._category_cache.get(class_name, 0)
+            category_id = self._category_cache.get(category_name, 0)
 
             if not existing_course:
-                # Kurs erstellen
                 changes.append(
                     {
                         "id": f"course:{idnumber}:create",
@@ -462,7 +541,7 @@ class MoodlePlugin(PluginBase):
                         "course_idnumber": idnumber,
                         "course_shortname": shortname,
                         "course_fullname": fullname,
-                        "category_name": class_name,
+                        "category_name": category_name,
                         "category_id": category_id,
                         "display_text": "Kurs anlegen",
                         "display_detail": "",
@@ -484,9 +563,12 @@ class MoodlePlugin(PluginBase):
                 except MoodleApiError as exc:
                     warnings.warn(f"Einschreibungen für {shortname}: {exc}")
 
-            # Lehrer-Einschreibung prüfen
+            # Lehrer-Einschreibung (Email-basiert, analog M365)
             teacher_surname = teacher_name.strip().lower()
-            teacher_user = self._surname_to_user.get(teacher_surname)
+            teacher_email = self._teacher_name_to_email.get(teacher_surname)
+            teacher_user = (
+                self._email_to_user.get(teacher_email) if teacher_email else None
+            )
             if teacher_user:
                 teacher_moodle_id = teacher_user["id"]
                 if teacher_moodle_id not in enrolled_teacher_ids:
@@ -507,18 +589,28 @@ class MoodlePlugin(PluginBase):
                             "display_detail": "Trainer einschreiben",
                         }
                     )
-            else:
-                if teacher_surname:
-                    warnings.warn(
-                        f"Lehrer '{teacher_name}' nicht in Moodle gefunden — "
-                        f"kann nicht als Trainer für {shortname} eingeschrieben werden"
+            elif teacher_surname:
+                if not teacher_email:
+                    log.warning(
+                        "Lehrer '%s' hat keine Email in SchILD — "
+                        "kann nicht als Trainer für %s eingeschrieben werden",
+                        teacher_name,
+                        shortname,
+                    )
+                else:
+                    log.warning(
+                        "Lehrer '%s' (%s) nicht in Moodle gefunden — "
+                        "kann nicht als Trainer für %s eingeschrieben werden",
+                        teacher_name,
+                        teacher_email,
+                        shortname,
                     )
 
             # Schüler-Einschreibungen (SOLL vs IST)
             for sid in sorted(student_ids):
                 student_user = self._idnumber_to_user.get(sid)
                 if not student_user:
-                    continue  # Schüler hat noch kein Moodle-Konto
+                    continue
                 student_moodle_id = student_user["id"]
                 student_name = (
                     f"{student_user.get('lastname', '')}, "
@@ -553,7 +645,6 @@ class MoodlePlugin(PluginBase):
                         expected_moodle_ids.add(su["id"])
 
                 for extra_id in sorted(enrolled_ids - expected_moodle_ids):
-                    # Name auflösen
                     extra_name = str(extra_id)
                     for u in self._all_moodle_users or []:
                         if u["id"] == extra_id:
@@ -610,28 +701,44 @@ class MoodlePlugin(PluginBase):
                     )
 
                 elif group_type == "course" and action == "create_group":
-                    # Kurs erstellen
+                    # Kurs erstellen (ggf. aus Vorlage duplizieren)
                     cat_name = ch.get("category_name", "")
                     cat_id = self._category_cache.get(
                         cat_name, ch.get("category_id", 0)
                     )
+                    fullname = ch.get("course_fullname", ch["group_name"])
+                    shortname = ch.get("course_shortname", ch["group_name"])
+                    idnumber = ch["course_idnumber"]
 
-                    course_data: dict = {
-                        "fullname": ch.get("course_fullname", ch["group_name"]),
-                        "shortname": ch.get("course_shortname", ch["group_name"]),
-                        "categoryid": cat_id or 1,  # 1 = Misc als Fallback
-                        "idnumber": ch["course_idnumber"],
-                    }
+                    if self._template_course_id > 0:
+                        # Vorlage-Kurs duplizieren
+                        created_course = self._moodle.duplicate_course(
+                            course_id=self._template_course_id,
+                            fullname=fullname,
+                            shortname=shortname,
+                            category_id=cat_id or 1,
+                            idnumber=idnumber,
+                        )
+                        self._course_cache[idnumber] = created_course
+                        msg = f"ID: {created_course['id']} (Vorlage)"
+                    else:
+                        course_data: dict = {
+                            "fullname": fullname,
+                            "shortname": shortname,
+                            "categoryid": cat_id or 1,
+                            "idnumber": idnumber,
+                        }
+                        created = self._moodle.create_courses(courses=[course_data])
+                        if created:
+                            self._course_cache[idnumber] = created[0]
+                        msg = f"ID: {created[0]['id']}" if created else ""
 
-                    created = self._moodle.create_courses(courses=[course_data])
-                    if created:
-                        self._course_cache[ch["course_idnumber"]] = created[0]
                     results.append(
                         {
                             "action": "create_course",
                             "group": ch["group_name"],
                             "success": True,
-                            "message": f"ID: {created[0]['id']}" if created else "",
+                            "message": msg,
                         }
                     )
 
