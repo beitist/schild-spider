@@ -978,8 +978,52 @@ class M365Plugin(PluginBase):
                     )
                 )
 
-        # In Batches à 20 aufteilen und absenden
+        # In Batches à 20 aufteilen und absenden, 429er sammeln für Retry
+        results, retry_items = self._send_batches(prepared, batch_limit)
+
+        # Retry-Runde für gedrosselte Requests (max 2 Durchgänge)
+        for retry_round in range(2):
+            if not retry_items:
+                break
+            retry_after = retry_items[0][2]  # Sekunden aus dem 429-Header
+            log.warning(
+                "Retry %d: %d gedrosselte Requests, warte %ds...",
+                retry_round + 1,
+                len(retry_items),
+                retry_after,
+            )
+            time.sleep(retry_after)
+            retry_prepared = [(ch, req) for ch, req, _ in retry_items]
+            new_results, retry_items = self._send_batches(retry_prepared, batch_limit)
+            results.extend(new_results)
+
+        # Übrige 429er als Fehler melden
+        for ch, _, _ in retry_items:
+            results.append(
+                {
+                    "action": ch["action"],
+                    "group": ch["group_name"],
+                    "success": False,
+                    "message": "Throttled (429) nach Retry",
+                }
+            )
+
+        return results
+
+    def _send_batches(
+        self,
+        prepared: list[tuple[dict, dict]],
+        batch_limit: int,
+    ) -> tuple[list[dict], list[tuple[dict, dict, int]]]:
+        """Sendet vorbereitete Requests in Batches.
+
+        Returns: (results, throttled_items)
+        throttled_items: [(change, request, retry_after_seconds), ...]
+        """
+        results: list[dict] = []
+        throttled: list[tuple[dict, dict, int]] = []
         total = len(prepared)
+
         for batch_start in range(0, total, batch_limit):
             batch_slice = prepared[batch_start : batch_start + batch_limit]
             batch_num = batch_start // batch_limit + 1
@@ -994,7 +1038,6 @@ class M365Plugin(PluginBase):
             try:
                 responses = self._graph.batch(batch_requests)
             except GraphApiError as exc:
-                # Gesamter Batch fehlgeschlagen
                 for ch, _ in batch_slice:
                     results.append(
                         {
@@ -1006,7 +1049,6 @@ class M365Plugin(PluginBase):
                     )
                 continue
 
-            # Responses den Changes zuordnen (per id)
             resp_by_id = {r["id"]: r for r in responses}
             for ch, req in batch_slice:
                 resp = resp_by_id.get(req["id"], {})
@@ -1020,11 +1062,14 @@ class M365Plugin(PluginBase):
                             "message": ch.get("member_name", ""),
                         }
                     )
+                elif status == 429:
+                    headers = resp.get("headers", {})
+                    retry_after = int(headers.get("Retry-After", 5))
+                    throttled.append((ch, req, retry_after))
                 else:
                     body = resp.get("body", {})
                     error = body.get("error", {})
                     msg = error.get("message", f"HTTP {status}")
-                    # "already exist" ist kein echter Fehler
                     if "already exist" not in msg.lower():
                         results.append(
                             {
@@ -1035,7 +1080,7 @@ class M365Plugin(PluginBase):
                             }
                         )
 
-        return results
+        return results, throttled
 
     def _poll_groups_ready(
         self, group_ids: list[str], timeout: int = 30, interval: int = 3
