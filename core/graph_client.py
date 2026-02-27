@@ -265,6 +265,19 @@ class GraphClient:
             params={"$select": "id,displayName,mailNickname,mail"},
         )
 
+    def get_group(self, group_id: str) -> dict | None:
+        """Holt eine Gruppe per ID. Gibt None zurück falls 404 (noch nicht repliziert)."""
+        try:
+            return self._request(
+                "GET",
+                f"/groups/{group_id}",
+                params={"$select": "id,displayName"},
+            )
+        except GraphApiError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
     def create_group(self, group_data: dict) -> dict:
         """Erstellt eine neue Gruppe."""
         return self._request("POST", "/groups", json=group_data)

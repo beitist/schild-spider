@@ -7,6 +7,7 @@ import logging
 import re
 import secrets
 import string
+import time
 import warnings
 
 from core.email_generator import generate_email
@@ -869,41 +870,73 @@ class M365Plugin(PluginBase):
         return changes
 
     def apply_group_changes(self, changes: list[dict]) -> list[dict]:
-        """Führt die vom User ausgewählten Gruppenänderungen aus."""
+        """Führt die vom User ausgewählten Gruppenänderungen aus.
+
+        Drei Phasen:
+        1. Alle Gruppen anlegen (create_group)
+        2. Polling: warten bis alle neuen Gruppen in Azure AD repliziert sind
+        3. Mitglieder hinzufügen/entfernen (add_member, remove_member)
+        """
         results: list[dict] = []
 
+        # --- Phase 1: Gruppen anlegen ---
+        new_group_ids: list[str] = []
+        for ch in changes:
+            if ch["action"] != "create_group":
+                continue
+            try:
+                template = (
+                    self._group_sus_template
+                    if ch["group_type"] == "sus"
+                    else self._group_kuk_template
+                )
+                cache = (
+                    self._sus_cache if ch["group_type"] == "sus" else self._kuk_cache
+                )
+                group_id = self._ensure_group(ch["class_name"], template, cache)
+                results.append(
+                    {
+                        "action": "create_group",
+                        "group": ch["group_name"],
+                        "success": bool(group_id),
+                        "message": group_id or "Erstellung fehlgeschlagen",
+                    }
+                )
+                if group_id:
+                    new_group_ids.append(group_id)
+            except GraphApiError as exc:
+                results.append(
+                    {
+                        "action": "create_group",
+                        "group": ch.get("group_name", ""),
+                        "success": False,
+                        "message": str(exc),
+                    }
+                )
+
+        # --- Phase 2: Polling — warten bis neue Gruppen erreichbar sind ---
+        if new_group_ids:
+            self._poll_groups_ready(new_group_ids)
+
+        # --- Phase 3: Mitglieder hinzufügen/entfernen ---
         for ch in changes:
             action = ch["action"]
-            class_name = ch["class_name"]
-            group_type = ch["group_type"]
+            if action == "create_group":
+                continue  # Bereits in Phase 1 erledigt
 
             try:
-                if action == "create_group":
+                if action == "add_member":
                     template = (
                         self._group_sus_template
-                        if group_type == "sus"
+                        if ch["group_type"] == "sus"
                         else self._group_kuk_template
                     )
-                    cache = self._sus_cache if group_type == "sus" else self._kuk_cache
-                    group_id = self._ensure_group(class_name, template, cache)
-                    results.append(
-                        {
-                            "action": "create_group",
-                            "group": ch["group_name"],
-                            "success": bool(group_id),
-                            "message": group_id or "Erstellung fehlgeschlagen",
-                        }
+                    cache = (
+                        self._sus_cache
+                        if ch["group_type"] == "sus"
+                        else self._kuk_cache
                     )
-
-                elif action == "add_member":
-                    # Gruppe sicherstellen (falls gerade erst erstellt)
-                    template = (
-                        self._group_sus_template
-                        if group_type == "sus"
-                        else self._group_kuk_template
-                    )
-                    cache = self._sus_cache if group_type == "sus" else self._kuk_cache
-                    group_id = self._ensure_group(class_name, template, cache)
+                    group_id = self._ensure_group(ch["class_name"], template, cache)
                     if group_id:
                         self._graph.add_member(group_id, ch["member_id"])
                         results.append(
@@ -939,20 +972,44 @@ class M365Plugin(PluginBase):
                         }
                     )
 
-        # Klassenlehrer als Owner der SuS-Gruppen (best-effort)
-        owner_processed: set[str] = set()
-        for ch in changes:
-            if ch["group_type"] == "sus" and ch["class_name"] not in owner_processed:
-                owner_processed.add(ch["class_name"])
-                sus_id = self._sus_cache.get(
-                    f"{self._group_sus_template}|{ch['class_name']}"
-                )
-                if sus_id:
-                    # Lehrer-Info aus den changes ableiten geht nicht direkt,
-                    # daher aus _all_users per Nachname (wie bisher)
-                    pass  # Owner werden in apply_new/apply_changes gesetzt
-
         return results
+
+    def _poll_groups_ready(
+        self, group_ids: list[str], timeout: int = 30, interval: int = 3
+    ) -> None:
+        """Wartet bis alle Gruppen per GET erreichbar sind (Azure AD Replikation).
+
+        Prüft alle Gruppen pro Durchgang. Bricht nach timeout Sekunden ab.
+        """
+        pending = set(group_ids)
+        deadline = time.time() + timeout
+        log.info(
+            "Warte auf Azure AD Replikation für %d neue Gruppe(n)...",
+            len(pending),
+        )
+
+        while pending and time.time() < deadline:
+            time.sleep(interval)
+            still_pending: set[str] = set()
+            for gid in pending:
+                if self._graph.get_group(gid) is None:
+                    still_pending.add(gid)
+            if still_pending:
+                log.info(
+                    "  %d/%d Gruppen noch nicht bereit, warte %ds...",
+                    len(still_pending),
+                    len(group_ids),
+                    interval,
+                )
+            pending = still_pending
+
+        if pending:
+            log.warning(
+                "%d Gruppe(n) nach %ds noch nicht repliziert — "
+                "fahre trotzdem fort (kann zu 404 führen).",
+                len(pending),
+                timeout,
+            )
 
 
 def _sanitize_nickname(text: str) -> str:
