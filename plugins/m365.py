@@ -918,59 +918,122 @@ class M365Plugin(PluginBase):
         if new_group_ids:
             self._poll_groups_ready(new_group_ids)
 
-        # --- Phase 3: Mitglieder hinzufügen/entfernen ---
-        for ch in changes:
+        # --- Phase 3: Mitglieder hinzufügen/entfernen (Batch à 20) ---
+        member_changes = [ch for ch in changes if ch["action"] != "create_group"]
+        if member_changes:
+            results.extend(self._apply_member_changes_batched(member_changes))
+
+        return results
+
+    def _apply_member_changes_batched(self, changes: list[dict]) -> list[dict]:
+        """Führt add_member/remove_member als Batch-Requests aus (max 20 pro Batch)."""
+        _GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+        batch_limit = self._graph._BATCH_LIMIT
+        results: list[dict] = []
+
+        # Batch-Requests vorbereiten: jedem Change eine Batch-Request-ID zuweisen
+        prepared: list[tuple[dict, dict]] = []  # (change, batch_request)
+        for idx, ch in enumerate(changes):
             action = ch["action"]
-            if action == "create_group":
-                continue  # Bereits in Phase 1 erledigt
 
+            if action == "add_member":
+                template = (
+                    self._group_sus_template
+                    if ch["group_type"] == "sus"
+                    else self._group_kuk_template
+                )
+                cache = (
+                    self._sus_cache if ch["group_type"] == "sus" else self._kuk_cache
+                )
+                group_id = cache.get(f"{template}|{ch['class_name']}")
+                if not group_id:
+                    continue
+                prepared.append(
+                    (
+                        ch,
+                        {
+                            "id": str(idx),
+                            "method": "POST",
+                            "url": f"/groups/{group_id}/members/$ref",
+                            "headers": {"Content-Type": "application/json"},
+                            "body": {
+                                "@odata.id": f"{_GRAPH_BASE_URL}/directoryObjects/{ch['member_id']}"
+                            },
+                        },
+                    )
+                )
+
+            elif action == "remove_member":
+                group_id = ch.get("group_id")
+                if not group_id:
+                    continue
+                prepared.append(
+                    (
+                        ch,
+                        {
+                            "id": str(idx),
+                            "method": "DELETE",
+                            "url": f"/groups/{group_id}/members/{ch['member_id']}/$ref",
+                        },
+                    )
+                )
+
+        # In Batches à 20 aufteilen und absenden
+        total = len(prepared)
+        for batch_start in range(0, total, batch_limit):
+            batch_slice = prepared[batch_start : batch_start + batch_limit]
+            batch_num = batch_start // batch_limit + 1
+            log.info(
+                "Batch %d: %d/%d Operationen senden...",
+                batch_num,
+                len(batch_slice),
+                total,
+            )
+
+            batch_requests = [req for _, req in batch_slice]
             try:
-                if action == "add_member":
-                    template = (
-                        self._group_sus_template
-                        if ch["group_type"] == "sus"
-                        else self._group_kuk_template
-                    )
-                    cache = (
-                        self._sus_cache
-                        if ch["group_type"] == "sus"
-                        else self._kuk_cache
-                    )
-                    group_id = self._ensure_group(ch["class_name"], template, cache)
-                    if group_id:
-                        self._graph.add_member(group_id, ch["member_id"])
-                        results.append(
-                            {
-                                "action": "add_member",
-                                "group": ch["group_name"],
-                                "success": True,
-                                "message": ch["member_name"],
-                            }
-                        )
-
-                elif action == "remove_member":
-                    group_id = ch.get("group_id")
-                    if group_id:
-                        self._graph.remove_member(group_id, ch["member_id"])
-                        results.append(
-                            {
-                                "action": "remove_member",
-                                "group": ch["group_name"],
-                                "success": True,
-                                "message": ch["member_name"],
-                            }
-                        )
-
+                responses = self._graph.batch(batch_requests)
             except GraphApiError as exc:
-                if "already exist" not in str(exc).lower():
+                # Gesamter Batch fehlgeschlagen
+                for ch, _ in batch_slice:
                     results.append(
                         {
-                            "action": action,
+                            "action": ch["action"],
                             "group": ch.get("group_name", ""),
                             "success": False,
-                            "message": str(exc),
+                            "message": f"Batch-Fehler: {exc}",
                         }
                     )
+                continue
+
+            # Responses den Changes zuordnen (per id)
+            resp_by_id = {r["id"]: r for r in responses}
+            for ch, req in batch_slice:
+                resp = resp_by_id.get(req["id"], {})
+                status = resp.get("status", 0)
+                if status in (200, 201, 204):
+                    results.append(
+                        {
+                            "action": ch["action"],
+                            "group": ch["group_name"],
+                            "success": True,
+                            "message": ch.get("member_name", ""),
+                        }
+                    )
+                else:
+                    body = resp.get("body", {})
+                    error = body.get("error", {})
+                    msg = error.get("message", f"HTTP {status}")
+                    # "already exist" ist kein echter Fehler
+                    if "already exist" not in msg.lower():
+                        results.append(
+                            {
+                                "action": ch["action"],
+                                "group": ch["group_name"],
+                                "success": False,
+                                "message": msg,
+                            }
+                        )
 
         return results
 

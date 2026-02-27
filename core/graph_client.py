@@ -312,3 +312,29 @@ class GraphClient:
                 "@odata.id": f"{_GRAPH_BASE}/directoryObjects/{user_id}",
             },
         )
+
+    # --- Batch ---
+
+    _BATCH_LIMIT = 20  # Graph API Maximum pro Batch-Request
+
+    def batch(self, requests_list: list[dict]) -> list[dict]:
+        """Sendet bis zu 20 Requests als Batch an POST /$batch.
+
+        Jeder Eintrag in requests_list hat:
+          {"id": "...", "method": "POST|DELETE", "url": "/groups/...",
+           "headers": {...}, "body": {...}}
+
+        Gibt die Responses zurück (gleiche Reihenfolge wie Eingabe).
+        Bei Throttling (429) wird der gesamte Batch wiederholt.
+        """
+        if not requests_list:
+            return []
+        if len(requests_list) > self._BATCH_LIMIT:
+            raise ValueError(
+                f"Batch enthält {len(requests_list)} Requests, "
+                f"max {self._BATCH_LIMIT} erlaubt."
+            )
+
+        payload = {"requests": requests_list}
+        resp = self._request("POST", "/$batch", json=payload)
+        return resp.get("responses", [])
