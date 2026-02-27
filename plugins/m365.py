@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 import string
@@ -12,6 +13,8 @@ from core.email_generator import generate_email
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
 from plugins.base import PluginBase
+
+log = logging.getLogger(__name__)
 
 
 class M365Plugin(PluginBase):
@@ -297,9 +300,6 @@ class M365Plugin(PluginBase):
                             "displayName": self._format_display_name(student),
                         },
                     )
-                    self._assign_to_class_group(
-                        user_id, student.get("class_name", ""), student
-                    )
                     results.append(
                         {
                             "school_internal_id": sid,
@@ -333,10 +333,6 @@ class M365Plugin(PluginBase):
                         self._graph.assign_license(user_id, self._license_sku_id)
                     except GraphApiError as exc:
                         warnings.warn(f"Lizenz für {sid}: {exc}")
-
-                self._assign_to_class_group(
-                    user_id, student.get("class_name", ""), student
-                )
 
                 results.append(
                     {"school_internal_id": sid, "success": True, "message": email}
@@ -407,10 +403,8 @@ class M365Plugin(PluginBase):
                     self._graph.update_user(user_id, updates)
 
                 # Gruppenwechsel bei Klassenwechsel
-                old_class = user.get("department", "")
-                new_class = student.get("class_name", "")
-                if old_class and new_class and old_class != new_class:
-                    self._move_between_groups(user_id, old_class, new_class, student)
+                # Klassenwechsel wird über compute_group_diff / apply_group_changes
+                # gesteuert (Vorschau mit Checkboxen), nicht als Nebeneffekt.
 
                 results.append(
                     {"school_internal_id": sid, "success": True, "message": ""}
@@ -506,76 +500,6 @@ class M365Plugin(PluginBase):
             )
             return None
 
-    def _assign_to_class_group(
-        self, user_id: str, class_name: str, student: dict
-    ) -> None:
-        """Fügt User zur SuS-Gruppe hinzu und pflegt KuK-Gruppe."""
-        # --- SuS-Gruppe: Schüler als Member, Lehrer als Owner ---
-        sus_id = self._ensure_group(
-            class_name, self._group_sus_template, self._sus_cache
-        )
-        if sus_id:
-            try:
-                self._graph.add_member(sus_id, user_id)
-            except GraphApiError as exc:
-                if "already exist" not in str(exc).lower():
-                    warnings.warn(f"SuS-Mitglied {user_id}: {exc}")
-
-            # Klassenlehrer als Owner der SuS-Gruppe (best-effort)
-            for teacher_field in ("class_teacher_1", "class_teacher_2"):
-                teacher_name = student.get(teacher_field, "")
-                if teacher_name:
-                    self._add_teacher_to_group(sus_id, teacher_name, as_owner=True)
-
-        # --- KuK-Gruppe: Lehrer als Member (einmal pro Klasse) ---
-        if class_name not in self._kuk_processed:
-            self._kuk_processed.add(class_name)
-            kuk_id = self._ensure_group(
-                class_name, self._group_kuk_template, self._kuk_cache
-            )
-            if kuk_id:
-                for teacher_field in ("class_teacher_1", "class_teacher_2"):
-                    teacher_name = student.get(teacher_field, "")
-                    if teacher_name:
-                        self._add_teacher_to_group(kuk_id, teacher_name, as_owner=False)
-
-    def _add_teacher_to_group(
-        self, group_id: str, teacher_name: str, *, as_owner: bool
-    ) -> None:
-        """Sucht den Lehrer per Email (aus SchILD) und fügt ihn zur Gruppe hinzu."""
-        email = self._teacher_name_to_email.get(teacher_name.strip().lower())
-        if not email:
-            return  # Kein Email → Warnung kam bereits in compute_group_diff
-        uid = self._upn_to_uid.get(email)
-        if not uid:
-            warnings.warn(f"Lehrer {teacher_name} ({email}): kein M365-User gefunden")
-            return
-        try:
-            if as_owner:
-                self._graph.add_owner(group_id, uid)
-            else:
-                self._graph.add_member(group_id, uid)
-        except GraphApiError as exc:
-            if "already exist" not in str(exc).lower():
-                warnings.warn(f"Lehrer {teacher_name}: {exc}")
-
-    def _move_between_groups(
-        self, user_id: str, old_class: str, new_class: str, student: dict
-    ) -> None:
-        """Verschiebt einen User zwischen SuS-Gruppen bei Klassenwechsel."""
-        # Aus alter SuS-Gruppe entfernen
-        old_sus_id = self._ensure_group(
-            old_class, self._group_sus_template, self._sus_cache
-        )
-        if old_sus_id:
-            try:
-                self._graph.remove_member(old_sus_id, user_id)
-            except GraphApiError:
-                pass
-
-        # In neue SuS-Gruppe aufnehmen + KuK-Gruppe pflegen
-        self._assign_to_class_group(user_id, new_class, student)
-
     def _collect_existing_emails(self) -> set[str]:
         """Sammelt alle existierenden Email-Adressen aus M365."""
         try:
@@ -603,6 +527,13 @@ class M365Plugin(PluginBase):
             upn = (u.get("userPrincipalName") or "").lower()
             if upn:
                 self._upn_to_uid[upn] = uid
+
+        log.info(
+            "M365-Lookups: %d User gesamt, %d mit employeeId, %d mit UPN",
+            len(self._all_users),
+            len(self._eid_to_uid),
+            len(self._upn_to_uid),
+        )
 
     def _find_group(
         self, class_name: str, template: str, cache: dict[str, str]
@@ -700,11 +631,15 @@ class M365Plugin(PluginBase):
         self._build_lookups()
 
         # Lehrer-Matching: Nachname → Email aus SchILD-Lehrerliste.
-        # Damit werden Lehrer per Email in M365 identifiziert statt per Nachname,
+        # Nur Lehrkräfte mit Amtsbezeichnung (filtert Sozialarbeiter etc. raus).
+        # Identifiziert Lehrer per Email in M365 statt per Nachname,
         # was Kollisionen mit gleichnamigen Schülern verhindert.
         self._teacher_name_to_email = {}
         no_email: list[str] = []
         for t in teachers:
+            job_title = (t.get("job_title") or "").strip()
+            if not job_title:
+                continue  # Ohne Amtsbezeichnung → kein Lehrer
             name = (t.get("last_name") or "").strip().lower()
             email = (t.get("email") or "").strip().lower()
             if not name:
@@ -721,6 +656,11 @@ class M365Plugin(PluginBase):
                 f"können nicht in M365-Gruppen aufgenommen werden."
             )
 
+        # --- Debug: LuL-Mapping ausgeben ---
+        log.info("=== LuL-Mapping (Nachname → Email) ===")
+        for name, email in sorted(self._teacher_name_to_email.items()):
+            log.info("  %s → %s", name, email)
+
         # Schüler nach Klasse gruppieren
         classes: dict[str, list[dict]] = {}
         for s in all_students:
@@ -728,8 +668,44 @@ class M365Plugin(PluginBase):
             if cn:
                 classes.setdefault(cn, []).append(s)
 
+        # --- Debug: SuS pro Klasse ---
+        log.info("=== SuS pro Klasse ===")
+        for cn in sorted(classes):
+            log.info("  %s: %d Schüler", cn, len(classes[cn]))
+
+        # --- Debug: LuL pro Klasse (aus Kursdaten + Klassenlehrer) ---
+        log.info("=== LuL pro Klasse (aus SchILD-Daten) ===")
+        for cn, students_in_class in sorted(classes.items()):
+            teachers_in_class: set[str] = set()
+            for s in students_in_class:
+                for f in ("class_teacher_1", "class_teacher_2"):
+                    t = (s.get(f) or "").strip()
+                    if t:
+                        teachers_in_class.add(t)
+                for course in s.get("courses", []):
+                    if isinstance(course, dict):
+                        t = (course.get("teacher_name") or "").strip()
+                    else:
+                        t = (course.teacher_name or "").strip()
+                    if t:
+                        teachers_in_class.add(t)
+            resolved = []
+            for t in sorted(teachers_in_class):
+                email = self._teacher_name_to_email.get(t.lower(), "???")
+                resolved.append(f"{t} ({email})")
+            log.info("  %s: %s", cn, ", ".join(resolved) if resolved else "(keine)")
+
         # Gruppen einmal bulk-laden statt pro Klasse
         self._bulk_load_groups(set(classes.keys()))
+
+        # --- Debug: Online-Gruppen (Caches) ---
+        log.info("=== Online-Gruppen (SuS-Cache) ===")
+        for key, gid in sorted(self._sus_cache.items()):
+            log.info("  %s → %s", key, gid)
+        log.info("=== Online-Gruppen (KuK-Cache) ===")
+        for key, gid in sorted(self._kuk_cache.items()):
+            log.info("  %s → %s", key, gid)
+        log.info("Bulk-Load komplett: %s", self._groups_bulk_loaded)
 
         changes: list[dict] = []
         for class_name, class_students in sorted(classes.items()):
