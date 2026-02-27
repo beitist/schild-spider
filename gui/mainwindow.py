@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -32,16 +32,27 @@ from gui.workers import LoadWorker, PluginApplyWorker, PluginComputeWorker
 # ---------------------------------------------------------------------------
 
 
-class _QtLogHandler(logging.Handler):
-    """Leitet Python-Log-Einträge an ein QTextEdit weiter."""
+class _LogSignalBridge(QObject):
+    """Brücke: nimmt Log-Nachrichten per Signal entgegen (thread-safe).
 
-    def __init__(self, callback) -> None:
+    Qt-Signals werden automatisch als QueuedConnection ausgeführt wenn
+    Sender und Empfänger in verschiedenen Threads laufen. Dadurch wird
+    der QTextEdit-Zugriff immer im Main-Thread ausgeführt.
+    """
+
+    message = Signal(str)
+
+
+class _QtLogHandler(logging.Handler):
+    """Leitet Python-Log-Einträge per Qt-Signal an die GUI weiter (thread-safe)."""
+
+    def __init__(self, bridge: _LogSignalBridge) -> None:
         super().__init__()
-        self._callback = callback
+        self._bridge = bridge
 
     def emit(self, record: logging.LogRecord) -> None:
         msg = self.format(record)
-        self._callback(msg)
+        self._bridge.message.emit(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +171,10 @@ class MainWindow(QMainWindow):
         self._log.setStyleSheet("font-family: monospace; font-size: 12px;")
         right_splitter.addWidget(self._log)
 
-        # Python-Logging → GUI-Log weiterleiten
-        self._log_handler = _QtLogHandler(self._log_msg)
+        # Python-Logging → GUI-Log weiterleiten (thread-safe via Qt-Signal)
+        self._log_bridge = _LogSignalBridge()
+        self._log_bridge.message.connect(self._log_msg)
+        self._log_handler = _QtLogHandler(self._log_bridge)
         self._log_handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
         self._log_handler.setLevel(logging.DEBUG)
         logging.getLogger("core").addHandler(self._log_handler)
