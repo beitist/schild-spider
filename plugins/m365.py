@@ -738,14 +738,29 @@ class M365Plugin(PluginBase):
                 }
             )
 
-        # SOLL: aktive Schüler dieser Klasse (employeeId → Fallback Email)
+        # SOLL: aktive Schüler + Klassenlehrer (employeeId → Fallback Email)
         expected_ids: set[str] = set()
+        kl_names: set[str] = set()
         for s in students:
             uid = self._eid_to_uid.get(s.get("school_internal_id", ""))
             if not uid:
                 email = (s.get("email") or "").lower()
                 if email:
                     uid = self._upn_to_uid.get(email)
+            if uid:
+                expected_ids.add(uid)
+            # Klassenlehrer-Namen sammeln
+            for f in ("class_teacher_1", "class_teacher_2"):
+                name = (s.get(f) or "").strip().lower()
+                if name:
+                    kl_names.add(name)
+
+        # Klassenlehrer über Email-Mapping auflösen
+        for name in kl_names:
+            email = self._teacher_name_to_email.get(name)
+            if not email:
+                continue
+            uid = self._upn_to_uid.get(email)
             if uid:
                 expected_ids.add(uid)
 

@@ -27,6 +27,7 @@ class MoodlePlugin(PluginBase):
         role_student: int,
         role_teacher: int,
         template_course_id: int,
+        category_hierarchy_template: str = "",
     ) -> None:
         self._moodle = MoodleClient(moodle_url, token)
         self._parent_category_id = parent_category_id
@@ -35,13 +36,16 @@ class MoodlePlugin(PluginBase):
         self._role_student = role_student or 5
         self._role_teacher = role_teacher or 3
         self._template_course_id = template_course_id or 0
+        self._hierarchy_tpl = category_hierarchy_template or "{klasse}"
 
         # Caches (pro Lauf)
         self._all_moodle_users: list[dict] | None = None
         self._idnumber_to_user: dict[str, dict] = {}
         self._email_to_user: dict[str, dict] = {}
         self._teacher_name_to_email: dict[str, str] = {}
-        self._category_cache: dict[str, int] = {}  # name → id
+        self._category_cache: dict[str, int] = {}  # name → id (legacy flat)
+        self._cat_by_parent: dict[tuple[int, str], int] = {}  # (parent, name) → id
+        self._path_to_cat_id: dict[str, int] = {}  # "A/B/C" → id
         self._course_cache: dict[str, dict] = {}  # idnumber → course
 
     # --- Metadaten ---
@@ -104,6 +108,13 @@ class MoodlePlugin(PluginBase):
                 default="0",
                 required=False,
             ),
+            ConfigField(
+                key="category_hierarchy_template",
+                label="Kategorie-Hierarchie ({anlage}/{abteilung}/{sgld}/{fk}/{klasse})",
+                placeholder="{klasse}",
+                default="{klasse}",
+                required=False,
+            ),
         ]
 
     @classmethod
@@ -121,6 +132,9 @@ class MoodlePlugin(PluginBase):
             role_student=int(config.get("role_student", 5) or 5),
             role_teacher=int(config.get("role_teacher", 3) or 3),
             template_course_id=int(config.get("template_course_id", 0) or 0),
+            category_hierarchy_template=config.get(
+                "category_hierarchy_template", "{klasse}"
+            ),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -170,15 +184,34 @@ class MoodlePlugin(PluginBase):
                 self._email_to_user[username] = u
 
     def _load_categories(self) -> None:
-        """Lädt Kategorien und baut name→id Cache."""
+        """Lädt Kategorien und baut tree-aware Caches."""
         if self._category_cache:
             return
         try:
             cats = self._moodle.get_categories()
-            for c in cats:
-                self._category_cache[c["name"]] = c["id"]
         except MoodleApiError as exc:
             warnings.warn(f"Kategorien laden: {exc}")
+            return
+
+        by_id: dict[int, dict] = {}
+        for c in cats:
+            by_id[c["id"]] = c
+            self._category_cache[c["name"]] = c["id"]
+            self._cat_by_parent[(c.get("parent", 0), c["name"])] = c["id"]
+
+        # Pfad-Cache aufbauen: "Anlage D/Abteilung/..." → id
+        def _build_path(cat_id: int) -> str:
+            parts: list[str] = []
+            current = cat_id
+            while current and current in by_id:
+                parts.append(by_id[current]["name"])
+                current = by_id[current].get("parent", 0)
+            parts.reverse()
+            return "/".join(parts)
+
+        for c in cats:
+            path = _build_path(c["id"])
+            self._path_to_cat_id[path] = c["id"]
 
     # --- Sync-Interface (Schüler-Accounts) ---
 
@@ -371,6 +404,24 @@ class MoodlePlugin(PluginBase):
             .strip()
         )
 
+    def _resolve_hierarchy(self, class_name: str, info: dict) -> list[str]:
+        """Löst das Kategorie-Template für eine Klasse auf.
+
+        Returns: Liste der Pfad-Segmente, z.B. ["Anlage D", "Gastgewerbe", "DEA25A"].
+        """
+        sgld = info.get("schulgliederung", "")
+        anlage = sgld[:1] if sgld else ""
+        path_str = (
+            self._hierarchy_tpl.replace(
+                "{anlage}", f"Anlage {anlage}" if anlage else ""
+            )
+            .replace("{abteilung}", info.get("abteilung", ""))
+            .replace("{sgld}", sgld)
+            .replace("{fk}", info.get("fachklasse", ""))
+            .replace("{klasse}", class_name)
+        )
+        return [p.strip() for p in path_str.split("/") if p.strip()]
+
     @staticmethod
     def _make_idnumber(class_name: str, course_name: str, teacher_name: str) -> str:
         """Erzeugt einen eindeutigen idnumber für einen Kurs."""
@@ -428,12 +479,14 @@ class MoodlePlugin(PluginBase):
                     t_name = course.get("teacher_name", "")
                     c_id = course.get("course_id", "")
                     kurs_bez = course.get("kurs_bezeichnung", "")
+                    kurs_zeugnis = course.get("kurs_zeugnisbez", "")
                     kursart = course.get("kursart", "")
                 else:
                     c_name = course.course_name
                     t_name = course.teacher_name
                     c_id = course.course_id
                     kurs_bez = getattr(course, "kurs_bezeichnung", "")
+                    kurs_zeugnis = getattr(course, "kurs_zeugnisbez", "")
                     kursart = getattr(course, "kursart", "")
 
                 if not c_name or not t_name:
@@ -442,9 +495,9 @@ class MoodlePlugin(PluginBase):
                 if c_id:
                     # Kurs-basiert: klassenübergreifend
                     key = ("kurs", c_id)
-                    display_name = kurs_bez or c_name
-                    if kursart:
-                        display_name = f"{display_name} {kursart}"
+                    # Zeugnisbez (z.B. "Biologie") als Hauptname,
+                    # KurzBez (z.B. "BI LK") als Zusatz
+                    display_name = kurs_zeugnis or c_name
                 else:
                     # Fach-basiert: pro Klasse
                     key = ("fach", class_name, c_name, t_name)
@@ -454,6 +507,8 @@ class MoodlePlugin(PluginBase):
                 if key not in course_meta:
                     course_meta[key] = {
                         "display_name": display_name,
+                        "kurs_bezeichnung": kurs_bez,
+                        "kursart": kursart,
                         "teacher_name": t_name,
                         "classes": set(),
                     }
@@ -462,28 +517,61 @@ class MoodlePlugin(PluginBase):
         if not course_map:
             return changes
 
-        # --- Klassen sammeln für Kategorie-Check ---
+        # --- Klassen-Info für Hierarchie sammeln ---
+        class_info: dict[str, dict] = {}
+        for s in all_students:
+            cn = s.get("class_name", "")
+            if cn and cn not in class_info:
+                class_info[cn] = {
+                    "abteilung": s.get("abteilung", ""),
+                    "fachklasse": s.get("fachklasse", ""),
+                    "schulgliederung": s.get("schulgliederung", ""),
+                }
+
+        # --- Kategorie-Hierarchie auflösen ---
+        class_to_cat_path: dict[str, list[str]] = {}
+        created_paths: set[str] = set()
+
         classes_needed: set[str] = set()
         for meta in course_meta.values():
             classes_needed.update(meta["classes"])
 
         for class_name in sorted(classes_needed):
-            if class_name not in self._category_cache:
-                changes.append(
-                    {
-                        "id": f"cat:{_sanitize(class_name)}:create",
-                        "group_type": "category",
-                        "group_name": class_name,
-                        "group_id": "",
-                        "action": "create_group",
-                        "member_name": "",
-                        "member_id": "",
-                        "class_name": class_name,
-                        "parent_category_id": self._parent_category_id,
-                        "display_text": "Kategorie anlegen",
-                        "display_detail": class_name,
-                    }
-                )
+            info = class_info.get(class_name, {})
+            path = self._resolve_hierarchy(class_name, info)
+            class_to_cat_path[class_name] = path
+
+            # Prüfe jede Hierarchie-Ebene
+            parent_id = self._parent_category_id
+            accumulated: list[str] = []
+            for level in path:
+                accumulated.append(level)
+                path_key = "/".join(accumulated)
+
+                cache_key = (parent_id, level)
+                if cache_key in self._cat_by_parent:
+                    parent_id = self._cat_by_parent[cache_key]
+                elif path_key in self._path_to_cat_id:
+                    parent_id = self._path_to_cat_id[path_key]
+                elif path_key not in created_paths:
+                    changes.append(
+                        {
+                            "id": f"cat:{_sanitize(path_key)}:create",
+                            "group_type": "category",
+                            "group_name": level,
+                            "group_id": "",
+                            "action": "create_group",
+                            "member_name": "",
+                            "member_id": "",
+                            "class_name": level,
+                            "parent_category_id": parent_id,
+                            "category_path": path_key,
+                            "display_text": "Kategorie anlegen",
+                            "display_detail": path_key,
+                        }
+                    )
+                    created_paths.add(path_key)
+                    parent_id = None  # Wird erst bei apply bekannt
 
         # --- Kurs- und Einschreibungs-Änderungen ---
         for key, student_ids in sorted(course_map.items()):
@@ -494,9 +582,10 @@ class MoodlePlugin(PluginBase):
             if key[0] == "kurs":
                 # Kurs-basiert: idnumber aus Kurs_ID
                 idnumber = f"kurs-{key[1]}"
-                class_for_template = "/".join(sorted(meta["classes"]))
-                # Kategorie: Parent-Kategorie (verfeinern mit Hierarchie später)
-                category_name = sorted(meta["classes"])[0]
+                class_for_template = ", ".join(sorted(meta["classes"]))
+                # Kategorie: Pfad der ersten beteiligten Klasse
+                first_class = sorted(meta["classes"])[0]
+                cat_path = class_to_cat_path.get(first_class, [first_class])
             else:
                 # Fach-basiert: wie bisher
                 _, class_for_template, fach_name, _ = key
@@ -504,7 +593,9 @@ class MoodlePlugin(PluginBase):
                 idnumber = self._make_idnumber(
                     class_for_template, fach_name, teacher_name
                 )
-                category_name = class_for_template
+                cat_path = class_to_cat_path.get(
+                    class_for_template, [class_for_template]
+                )
 
             shortname = self._format_course_name(
                 self._shortname_tpl, class_for_template, display_name, teacher_name
@@ -525,7 +616,11 @@ class MoodlePlugin(PluginBase):
                     pass
 
             course_id = existing_course["id"] if existing_course else None
-            category_id = self._category_cache.get(category_name, 0)
+            cat_path_str = "/".join(cat_path)
+            category_id = self._path_to_cat_id.get(cat_path_str, 0)
+            if not category_id:
+                # Fallback: letzte Ebene als Name
+                category_id = self._category_cache.get(cat_path[-1], 0)
 
             if not existing_course:
                 changes.append(
@@ -541,10 +636,10 @@ class MoodlePlugin(PluginBase):
                         "course_idnumber": idnumber,
                         "course_shortname": shortname,
                         "course_fullname": fullname,
-                        "category_name": category_name,
+                        "category_path": cat_path_str,
                         "category_id": category_id,
                         "display_text": "Kurs anlegen",
-                        "display_detail": "",
+                        "display_detail": cat_path_str,
                     }
                 )
 
@@ -683,29 +778,55 @@ class MoodlePlugin(PluginBase):
 
             try:
                 if group_type == "category" and action == "create_group":
-                    # Kategorie erstellen
+                    # Kategorie erstellen (hierarchisch)
                     cat_name = ch["group_name"]
-                    parent_id = ch.get("parent_category_id", self._parent_category_id)
+                    cat_path = ch.get("category_path", cat_name)
+
+                    # Parent auflösen: Pfad ohne letzte Ebene
+                    path_parts = cat_path.split("/")
+                    if len(path_parts) > 1:
+                        parent_path = "/".join(path_parts[:-1])
+                        parent_id = self._path_to_cat_id.get(
+                            parent_path,
+                            ch.get("parent_category_id", self._parent_category_id),
+                        )
+                    else:
+                        parent_id = ch.get(
+                            "parent_category_id", self._parent_category_id
+                        )
+
                     created = self._moodle.create_categories(
                         categories=[{"name": cat_name, "parent": parent_id}]
                     )
                     if created:
-                        self._category_cache[cat_name] = created[0]["id"]
+                        new_id = created[0]["id"]
+                        self._category_cache[cat_name] = new_id
+                        self._path_to_cat_id[cat_path] = new_id
+                        if isinstance(parent_id, int):
+                            self._cat_by_parent[(parent_id, cat_name)] = new_id
                     results.append(
                         {
                             "action": "create_category",
                             "group": cat_name,
                             "success": True,
-                            "message": f"ID: {created[0]['id']}" if created else "",
+                            "message": (
+                                f"ID: {created[0]['id']} ({cat_path})"
+                                if created
+                                else ""
+                            ),
                         }
                     )
 
                 elif group_type == "course" and action == "create_group":
                     # Kurs erstellen (ggf. aus Vorlage duplizieren)
-                    cat_name = ch.get("category_name", "")
-                    cat_id = self._category_cache.get(
-                        cat_name, ch.get("category_id", 0)
-                    )
+                    cat_path = ch.get("category_path", "")
+                    cat_id = self._path_to_cat_id.get(cat_path, 0)
+                    if not cat_id:
+                        # Fallback: letzte Ebene als Name
+                        leaf = cat_path.split("/")[-1] if cat_path else ""
+                        cat_id = self._category_cache.get(
+                            leaf, ch.get("category_id", 0)
+                        )
                     fullname = ch.get("course_fullname", ch["group_name"])
                     shortname = ch.get("course_shortname", ch["group_name"])
                     idnumber = ch["course_idnumber"]

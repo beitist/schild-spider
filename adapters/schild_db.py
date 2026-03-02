@@ -48,17 +48,19 @@ _SQL_CLASS_TEACHERS = """
 # eigeneschule_faecher → Zeugnisbez (nicht Bezeichnung!)
 _SQL_COURSES = """
     SELECT
-        la.Schueler_ID        AS student_id,
-        f.Zeugnisbez          AS course_name,
-        kl.Nachname           AS teacher_name,
-        ld.Kurs_ID            AS course_id,
-        ku.Bezeichnung        AS kurs_bezeichnung,
-        ld.KursartAllg        AS kursart
+        la.Schueler_ID                    AS student_id,
+        f.Zeugnisbez                      AS course_name,
+        COALESCE(kl.Nachname, kl2.Nachname) AS teacher_name,
+        ld.Kurs_ID                        AS course_id,
+        ku.KurzBez                        AS kurs_bezeichnung,
+        ku.Zeugnisbez                     AS kurs_zeugnisbez,
+        ld.KursartAllg                    AS kursart
     FROM schuelerleistungsdaten ld
     JOIN schuelerlernabschnittsdaten la ON ld.Abschnitt_ID = la.ID
-    LEFT JOIN eigeneschule_faecher f ON ld.Fach_ID = f.ID
-    LEFT JOIN k_lehrer kl ON ld.FachLehrer = kl.Kuerzel
-    LEFT JOIN Kurse ku ON ld.Kurs_ID = ku.ID
+    LEFT JOIN eigeneschule_faecher f   ON ld.Fach_ID = f.ID
+    LEFT JOIN k_lehrer kl              ON ld.FachLehrer = kl.Kuerzel
+    LEFT JOIN Kurse ku                 ON ld.Kurs_ID = ku.ID
+    LEFT JOIN k_lehrer kl2             ON ku.LehrerKrz = kl2.Kuerzel
     WHERE la.Jahr = %s AND la.Abschnitt = %s
 """
 
@@ -80,6 +82,23 @@ _SQL_PHOTOS = """
         sf.Foto               AS photo_blob
     FROM schuelerfotos sf
     WHERE sf.Schueler_ID IN ({placeholders})
+"""
+
+# Kategorie-Hierarchie pro Klasse: Abteilung, Fachklasse, Schulgliederung (BKIndexTyp)
+# versetzung.Fachklasse_ID → eigeneschule_fachklassen (Bezeichnung, BKIndexTyp)
+# eigeneschule_abt_kl.Klasse → eigeneschule_abteilungen (Bezeichnung)
+_SQL_CLASS_HIERARCHY = """
+    SELECT
+        v.Klasse                     AS class_name,
+        fk.Bezeichnung               AS fachklasse,
+        fk.BKIndexTyp                AS schulgliederung,
+        abt.Bezeichnung              AS abteilung
+    FROM versetzung v
+    LEFT JOIN eigeneschule_fachklassen fk ON v.Fachklasse_ID = fk.ID
+    LEFT JOIN eigeneschule_abt_kl ak     ON ak.Klasse = v.Klasse
+                                          AND ak.Sichtbar = '+'
+    LEFT JOIN eigeneschule_abteilungen abt ON ak.Abteilung_ID = abt.ID
+                                              AND abt.Sichtbar = '+'
 """
 
 _SQL_WRITE_BACK_EMAIL = """
@@ -223,7 +242,17 @@ class SchildDbAdapter(AdapterBase):
             if klass:
                 class_teachers_by_class[klass] = ct
 
-        # 3. Kurszuordnungen laden (parametrisiert mit Schuljahr + Abschnitt)
+        # 3. Kategorie-Hierarchie pro Klasse laden
+        cursor.execute(_SQL_CLASS_HIERARCHY)
+        hier_cols = [col[0] for col in cursor.description]
+        hierarchy_by_class: dict[str, dict] = {}
+        for row in cursor.fetchall():
+            h = dict(zip(hier_cols, row))
+            klass = (h.get("class_name") or "").strip()
+            if klass and klass not in hierarchy_by_class:
+                hierarchy_by_class[klass] = h
+
+        # 4. Kurszuordnungen laden (parametrisiert mit Schuljahr + Abschnitt)
         cursor.execute(_SQL_COURSES, (self.schuljahr, self.abschnitt))
         course_cols = [col[0] for col in cursor.description]
         courses_by_student: dict[str, list[CourseAssignment]] = {}
@@ -235,11 +264,12 @@ class SchildDbAdapter(AdapterBase):
                 teacher_name=c.get("teacher_name", "") or "",
                 course_id=str(c.get("course_id", "") or ""),
                 kurs_bezeichnung=c.get("kurs_bezeichnung", "") or "",
+                kurs_zeugnisbez=c.get("kurs_zeugnisbez", "") or "",
                 kursart=c.get("kursart", "") or "",
             )
             courses_by_student.setdefault(sid, []).append(assignment)
 
-        # 4. Fotos laden
+        # 5. Fotos laden
         student_ids = [
             str(raw.get("school_internal_id", "")).strip()
             for raw in raw_students
@@ -249,7 +279,7 @@ class SchildDbAdapter(AdapterBase):
 
         conn.close()
 
-        # 5. Zusammenbauen
+        # 6. Zusammenbauen
         students: list[StudentRecord] = []
         skipped = 0
 
@@ -261,6 +291,7 @@ class SchildDbAdapter(AdapterBase):
 
             class_name = (raw.get("class_name") or "").strip()
             ct = class_teachers_by_class.get(class_name, {})
+            hier = hierarchy_by_class.get(class_name, {})
             dob = self._format_date(raw.get("dob"))
 
             students.append(
@@ -274,6 +305,9 @@ class SchildDbAdapter(AdapterBase):
                     photo_path=photos_by_sid.get(sid),
                     class_teacher_1=(ct.get("teacher_1") or "").strip(),
                     class_teacher_2=(ct.get("teacher_2") or "").strip(),
+                    abteilung=(hier.get("abteilung") or "").strip(),
+                    fachklasse=(hier.get("fachklasse") or "").strip(),
+                    schulgliederung=(hier.get("schulgliederung") or "").strip(),
                     courses=courses_by_student.get(sid, []),
                 )
             )

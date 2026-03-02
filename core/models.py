@@ -10,7 +10,8 @@ class CourseAssignment:
     course_name: str  # Fachbezeichnung (z.B. "Mathematik")
     teacher_name: str  # Fachlehrkraft (z.B. "Müller")
     course_id: str = ""  # Optionale Kurs-ID (SchILD Kurs_ID)
-    kurs_bezeichnung: str = ""  # Kursbezeichnung aus Kurse-Tabelle
+    kurs_bezeichnung: str = ""  # KurzBez aus Kurse-Tabelle (z.B. "BI LK")
+    kurs_zeugnisbez: str = ""  # Zeugnisbez aus Kurse-Tabelle (z.B. "Biologie")
     kursart: str = ""  # KursartAllg (GK, LK, etc.)
 
 
@@ -28,6 +29,10 @@ class StudentRecord:
     # Klassenlehrer (aus Klassen-Tabelle, denormalisiert auf Schüler)
     class_teacher_1: str = ""
     class_teacher_2: str = ""
+    # Kategorie-Hierarchie (aus SchILD: versetzung + Fachklassen + Abteilungen)
+    abteilung: str = ""  # eigeneschule_abteilungen.Bezeichnung
+    fachklasse: str = ""  # eigeneschule_fachklassen.Bezeichnung
+    schulgliederung: str = ""  # eigeneschule_fachklassen.BKIndexTyp (z.B. "D01")
     # Kurse/Fächer (nur via DB-Adapter verfügbar)
     courses: list[CourseAssignment] = field(default_factory=list)
 

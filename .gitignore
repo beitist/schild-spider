@@ -30,3 +30,4 @@ data/
 internal/
 
 *.log
+*.csv
