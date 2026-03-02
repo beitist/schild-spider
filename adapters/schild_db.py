@@ -266,8 +266,28 @@ class SchildDbAdapter(AdapterBase):
                 hierarchy_by_class[klass] = h
 
         # 4. Kurszuordnungen laden — Zwei-Schritt-Verfahren
+        # Schuljahr/Abschnitt: Config-Wert oder Fallback aus Schülerdaten
+        schuljahr = self.schuljahr.strip()
+        abschnitt = self.abschnitt.strip()
+        if not schuljahr or not abschnitt:
+            for raw in raw_students:
+                sj = str(raw.get("akt_schuljahr") or "").strip()
+                ab = str(raw.get("akt_abschnitt") or "").strip()
+                if sj and ab:
+                    if not schuljahr:
+                        schuljahr = sj
+                    if not abschnitt:
+                        abschnitt = ab
+                    break
+            log.info(
+                "Schuljahr/Abschnitt aus Config leer → Fallback aus Schülerdaten:"
+                " Schuljahr=%s, Halbjahr=%s",
+                schuljahr,
+                abschnitt,
+            )
+
         # 4a: Abschnitt-IDs für das Schuljahr/Halbjahr ermitteln
-        cursor.execute(_SQL_ABSCHNITT_IDS, (self.schuljahr, self.abschnitt))
+        cursor.execute(_SQL_ABSCHNITT_IDS, (schuljahr, abschnitt))
         abschnitt_cols = [col[0] for col in cursor.description]
         abschnitt_to_student: dict[int, str] = {}
         for row in cursor.fetchall():
@@ -277,8 +297,8 @@ class SchildDbAdapter(AdapterBase):
         log.info(
             "Lernabschnitte: %d Abschnitte für Schuljahr=%s, Halbjahr=%s",
             len(abschnitt_to_student),
-            self.schuljahr,
-            self.abschnitt,
+            schuljahr,
+            abschnitt,
         )
 
         # 4b: Leistungsdaten für diese Abschnitte laden
@@ -337,9 +357,35 @@ class SchildDbAdapter(AdapterBase):
             total_courses,
             len(courses_by_student),
             with_teacher,
-            self.schuljahr,
-            self.abschnitt,
+            schuljahr,
+            abschnitt,
         )
+
+        # Diagnostik: Fachzuordnungen pro Klasse
+        sid_to_class: dict[str, str] = {}
+        for raw in raw_students:
+            sid = str(raw.get("school_internal_id", "")).strip()
+            klass = (raw.get("class_name") or "").strip()
+            if sid and klass:
+                sid_to_class[sid] = klass
+        class_course_counts: dict[
+            str, tuple[int, int]
+        ] = {}  # {klasse: (total, mit_lehrer)}
+        for sid, clist in courses_by_student.items():
+            klass = sid_to_class.get(sid, "?")
+            prev_total, prev_with = class_course_counts.get(klass, (0, 0))
+            class_course_counts[klass] = (
+                prev_total + len(clist),
+                prev_with + sum(1 for c in clist if c.teacher_name),
+            )
+        for klass in sorted(class_course_counts):
+            total, with_t = class_course_counts[klass]
+            log.info(
+                "  Klasse %s: %d Fachzuordnungen, %d mit Lehrkraft",
+                klass,
+                total,
+                with_t,
+            )
 
         # 5. Fotos laden
         student_ids = [
