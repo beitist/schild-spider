@@ -53,8 +53,9 @@ class M365Plugin(PluginBase):
         self._existing_emails: set[str] = set()  # gecached aus get_manifest
         self._all_users: list[dict] | None = None  # gecached für Lehrer-Suche
         self._groups_bulk_loaded: bool = False  # Gruppen-Cache komplett?
-        # Lehrer-Matching: Nachname → Email (aus SchILD-Lehrerliste)
-        self._teacher_name_to_email: dict[str, str] = {}
+        # Lehrer-Matching: Kürzel → Email (aus Kursdaten + Klassenlehrer)
+        self._kuerzel_to_email: dict[str, str] = {}
+        self._kuerzel_to_name: dict[str, str] = {}
 
     # --- Metadaten ---
 
@@ -631,36 +632,48 @@ class M365Plugin(PluginBase):
         """Berechnet geplante Gruppenänderungen (SOLL vs IST) für die Vorschau."""
         self._build_lookups()
 
-        # Lehrer-Matching: Nachname → Email aus SchILD-Lehrerliste.
-        # Nur Lehrkräfte mit Amtsbezeichnung (filtert Sozialarbeiter etc. raus).
-        # Identifiziert Lehrer per Email in M365 statt per Nachname,
-        # was Kollisionen mit gleichnamigen Schülern verhindert.
-        self._teacher_name_to_email = {}
-        no_email: list[str] = []
-        for t in teachers:
-            job_title = (t.get("job_title") or "").strip()
-            if not job_title:
-                continue  # Ohne Amtsbezeichnung → kein Lehrer
-            name = (t.get("last_name") or "").strip().lower()
-            email = (t.get("email") or "").strip().lower()
-            if not name:
-                continue
-            if not email:
-                no_email.append(t.get("last_name", "?"))
-                continue
-            if name not in self._teacher_name_to_email:
-                self._teacher_name_to_email[name] = email
-        if no_email:
-            warnings.warn(
-                f"Lehrer ohne Email in SchILD ({len(no_email)}): "
-                f"{', '.join(sorted(set(no_email)))} — "
-                f"können nicht in M365-Gruppen aufgenommen werden."
-            )
+        # Lehrer-Matching: Kürzel → Email direkt aus den Kursdaten.
+        # Jeder FachLehrer hat ein eindeutiges Kürzel in SchILD.
+        # Wir sammeln alle Kürzel aus den Leistungsdaten + Klassenlehrer
+        # und nutzen die direkt verknüpfte Email aus k_lehrer.
+        self._kuerzel_to_email: dict[str, str] = {}
+        self._kuerzel_to_name: dict[str, str] = {}
+        for s in all_students:
+            # Klassenlehrer-Kürzel
+            for krz_field, email_field, name_field in (
+                ("class_teacher_1_krz", "class_teacher_1_email", "class_teacher_1"),
+                ("class_teacher_2_krz", "class_teacher_2_email", "class_teacher_2"),
+            ):
+                krz = (s.get(krz_field) or "").strip()
+                email = (s.get(email_field) or "").strip().lower()
+                name = (s.get(name_field) or "").strip()
+                if krz and email:
+                    self._kuerzel_to_email[krz] = email
+                if krz and name:
+                    self._kuerzel_to_name[krz] = name
+            # FachLehrer-Kürzel aus Kursdaten
+            for course in s.get("courses", []):
+                if isinstance(course, dict):
+                    krz = (course.get("teacher_kuerzel") or "").strip()
+                    email = (course.get("teacher_email") or "").strip().lower()
+                    name = (course.get("teacher_name") or "").strip()
+                else:
+                    krz = (course.teacher_kuerzel or "").strip()
+                    email = (course.teacher_email or "").strip().lower()
+                    name = (course.teacher_name or "").strip()
+                if krz and email:
+                    self._kuerzel_to_email[krz] = email
+                if krz and name:
+                    self._kuerzel_to_name[krz] = name
 
         # --- Debug: LuL-Mapping ausgeben ---
-        log.info("=== LuL-Mapping (Nachname → Email) ===")
-        for name, email in sorted(self._teacher_name_to_email.items()):
-            log.info("  %s → %s", name, email)
+        log.info(
+            "=== LuL-Mapping (%d Kürzel mit Email) ===",
+            len(self._kuerzel_to_email),
+        )
+        for krz in sorted(self._kuerzel_to_email):
+            name = self._kuerzel_to_name.get(krz, "?")
+            log.info("  %s (%s) → %s", krz, name, self._kuerzel_to_email[krz])
 
         # Schüler nach Klasse gruppieren
         classes: dict[str, list[dict]] = {}
@@ -694,23 +707,24 @@ class M365Plugin(PluginBase):
         # --- Debug: LuL pro Klasse (aus Kursdaten + Klassenlehrer) ---
         log.info("=== LuL pro Klasse (aus SchILD-Daten) ===")
         for cn, students_in_class in sorted(classes.items()):
-            teachers_in_class: set[str] = set()
+            kuerzel_in_class: set[str] = set()
             for s in students_in_class:
-                for f in ("class_teacher_1", "class_teacher_2"):
-                    t = (s.get(f) or "").strip()
-                    if t:
-                        teachers_in_class.add(t)
+                for krz_field in ("class_teacher_1_krz", "class_teacher_2_krz"):
+                    krz = (s.get(krz_field) or "").strip()
+                    if krz:
+                        kuerzel_in_class.add(krz)
                 for course in s.get("courses", []):
                     if isinstance(course, dict):
-                        t = (course.get("teacher_name") or "").strip()
+                        krz = (course.get("teacher_kuerzel") or "").strip()
                     else:
-                        t = (course.teacher_name or "").strip()
-                    if t:
-                        teachers_in_class.add(t)
+                        krz = (course.teacher_kuerzel or "").strip()
+                    if krz:
+                        kuerzel_in_class.add(krz)
             resolved = []
-            for t in sorted(teachers_in_class):
-                email = self._teacher_name_to_email.get(t.lower(), "???")
-                resolved.append(f"{t} ({email})")
+            for krz in sorted(kuerzel_in_class):
+                name = self._kuerzel_to_name.get(krz, "?")
+                email = self._kuerzel_to_email.get(krz, "???")
+                resolved.append(f"{name} [{krz}] ({email})")
             log.info("  %s: %s", cn, ", ".join(resolved) if resolved else "(keine)")
 
         # Gruppen einmal bulk-laden statt pro Klasse
@@ -757,7 +771,7 @@ class M365Plugin(PluginBase):
 
         # SOLL: aktive Schüler + Klassenlehrer (employeeId → Fallback Email)
         expected_ids: set[str] = set()
-        kl_names: set[str] = set()
+        kl_kuerzel: set[str] = set()
         for s in students:
             uid = self._eid_to_uid.get(s.get("school_internal_id", ""))
             if not uid:
@@ -766,15 +780,15 @@ class M365Plugin(PluginBase):
                     uid = self._upn_to_uid.get(email)
             if uid:
                 expected_ids.add(uid)
-            # Klassenlehrer-Namen sammeln
-            for f in ("class_teacher_1", "class_teacher_2"):
-                name = (s.get(f) or "").strip().lower()
-                if name:
-                    kl_names.add(name)
+            # Klassenlehrer-Kürzel sammeln
+            for f in ("class_teacher_1_krz", "class_teacher_2_krz"):
+                krz = (s.get(f) or "").strip()
+                if krz:
+                    kl_kuerzel.add(krz)
 
-        # Klassenlehrer über Email-Mapping auflösen
-        for name in kl_names:
-            email = self._teacher_name_to_email.get(name)
+        # Klassenlehrer über Kürzel → Email → M365 User auflösen
+        for krz in kl_kuerzel:
+            email = self._kuerzel_to_email.get(krz)
             if not email:
                 continue
             uid = self._upn_to_uid.get(email)
@@ -841,24 +855,24 @@ class M365Plugin(PluginBase):
                 }
             )
 
-        # SOLL: alle Lehrer dieser Klasse (Klassenlehrer + Fachlehrer)
-        expected_teacher_names: set[str] = set()
+        # SOLL: alle Lehrer dieser Klasse (Klassenlehrer + Fachlehrer per Kürzel)
+        expected_kuerzel: set[str] = set()
         for s in students:
-            for f in ("class_teacher_1", "class_teacher_2"):
-                name = (s.get(f) or "").strip().lower()
-                if name:
-                    expected_teacher_names.add(name)
+            for f in ("class_teacher_1_krz", "class_teacher_2_krz"):
+                krz = (s.get(f) or "").strip()
+                if krz:
+                    expected_kuerzel.add(krz)
             for course in s.get("courses", []):
                 if isinstance(course, dict):
-                    name = (course.get("teacher_name") or "").strip().lower()
+                    krz = (course.get("teacher_kuerzel") or "").strip()
                 else:
-                    name = (course.teacher_name or "").strip().lower()
-                if name:
-                    expected_teacher_names.add(name)
+                    krz = (course.teacher_kuerzel or "").strip()
+                if krz:
+                    expected_kuerzel.add(krz)
 
         expected_ids: set[str] = set()
-        for name in expected_teacher_names:
-            email = self._teacher_name_to_email.get(name)
+        for krz in expected_kuerzel:
+            email = self._kuerzel_to_email.get(krz)
             if not email:
                 continue
             uid = self._upn_to_uid.get(email)

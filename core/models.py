@@ -8,11 +8,13 @@ class CourseAssignment:
     """Fach-/Kurszuordnung eines Schülers."""
 
     course_name: str  # Fachbezeichnung (z.B. "Mathematik")
-    teacher_name: str  # Fachlehrkraft (z.B. "Müller")
+    teacher_name: str  # Fachlehrkraft Nachname (z.B. "Müller")
     course_id: str = ""  # Optionale Kurs-ID (SchILD Kurs_ID)
     kurs_bezeichnung: str = ""  # KurzBez aus Kurse-Tabelle (z.B. "BI LK")
     kurs_zeugnisbez: str = ""  # Zeugnisbez aus Kurse-Tabelle (z.B. "Biologie")
     kursart: str = ""  # KursartAllg (GK, LK, etc.)
+    teacher_kuerzel: str = ""  # FachLehrer-Kürzel (eindeutig, z.B. "WOL")
+    teacher_email: str = ""  # EMailDienstlich des FachLehrers
 
 
 @dataclass
@@ -29,6 +31,10 @@ class StudentRecord:
     # Klassenlehrer (aus Klassen-Tabelle, denormalisiert auf Schüler)
     class_teacher_1: str = ""
     class_teacher_2: str = ""
+    class_teacher_1_krz: str = ""  # KlassenlehrerKrz (eindeutig)
+    class_teacher_2_krz: str = ""  # StvKlassenlehrerKrz
+    class_teacher_1_email: str = ""  # EMailDienstlich KL1
+    class_teacher_2_email: str = ""  # EMailDienstlich KL2
     # Kategorie-Hierarchie (aus SchILD: versetzung + Fachklassen + Abteilungen)
     abteilung: str = ""  # eigeneschule_abteilungen.Bezeichnung
     fachklasse: str = ""  # eigeneschule_fachklassen.Bezeichnung

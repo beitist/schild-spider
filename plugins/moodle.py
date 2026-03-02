@@ -42,7 +42,7 @@ class MoodlePlugin(PluginBase):
         self._all_moodle_users: list[dict] | None = None
         self._idnumber_to_user: dict[str, dict] = {}
         self._email_to_user: dict[str, dict] = {}
-        self._teacher_name_to_email: dict[str, str] = {}
+        self._kuerzel_to_email: dict[str, str] = {}
         self._category_cache: dict[str, int] = {}  # name → id (legacy flat)
         self._cat_by_parent: dict[tuple[int, str], int] = {}  # (parent, name) → id
         self._path_to_cat_id: dict[str, int] = {}  # "A/B/C" → id
@@ -442,26 +442,19 @@ class MoodlePlugin(PluginBase):
 
         changes: list[dict] = []
 
-        # --- LuL-Mapping aufbauen (Nachname → Email, analog M365) ---
-        self._teacher_name_to_email = {}
-        no_email: list[str] = []
-        for t in teachers:
-            job_title = (t.get("job_title") or "").strip()
-            if not job_title:
-                continue  # Ohne Amtsbezeichnung → kein Lehrer
-            name = (t.get("last_name") or "").strip().lower()
-            email = (t.get("email") or "").strip().lower()
-            if not name:
-                continue
-            if not email:
-                no_email.append(t.get("last_name", "?"))
-                continue
-            if name not in self._teacher_name_to_email:
-                self._teacher_name_to_email[name] = email
-
-        if no_email:
-            log.warning("Lehrer ohne Email: %s", ", ".join(no_email))
-        log.info("LuL-Mapping: %d Lehrer mit Email", len(self._teacher_name_to_email))
+        # --- LuL-Mapping aufbauen (Kürzel → Email direkt aus Kursdaten) ---
+        self._kuerzel_to_email: dict[str, str] = {}
+        for s in all_students:
+            for course in s.get("courses", []):
+                if isinstance(course, dict):
+                    krz = (course.get("teacher_kuerzel") or "").strip()
+                    email = (course.get("teacher_email") or "").strip().lower()
+                else:
+                    krz = (course.teacher_kuerzel or "").strip()
+                    email = (course.teacher_email or "").strip().lower()
+                if krz and email:
+                    self._kuerzel_to_email[krz] = email
+        log.info("LuL-Mapping: %d Kürzel mit Email", len(self._kuerzel_to_email))
 
         # --- Kurse aus Schüler-Daten sammeln ---
         # Key: ("kurs", kurs_id) oder ("fach", klasse, fach, lehrer)
@@ -477,6 +470,8 @@ class MoodlePlugin(PluginBase):
                 if isinstance(course, dict):
                     c_name = course.get("course_name", "")
                     t_name = course.get("teacher_name", "")
+                    t_krz = course.get("teacher_kuerzel", "")
+                    t_email = course.get("teacher_email", "")
                     c_id = course.get("course_id", "")
                     kurs_bez = course.get("kurs_bezeichnung", "")
                     kurs_zeugnis = course.get("kurs_zeugnisbez", "")
@@ -484,6 +479,8 @@ class MoodlePlugin(PluginBase):
                 else:
                     c_name = course.course_name
                     t_name = course.teacher_name
+                    t_krz = getattr(course, "teacher_kuerzel", "")
+                    t_email = getattr(course, "teacher_email", "")
                     c_id = course.course_id
                     kurs_bez = getattr(course, "kurs_bezeichnung", "")
                     kurs_zeugnis = getattr(course, "kurs_zeugnisbez", "")
@@ -510,6 +507,8 @@ class MoodlePlugin(PluginBase):
                         "kurs_bezeichnung": kurs_bez,
                         "kursart": kursart,
                         "teacher_name": t_name,
+                        "teacher_kuerzel": t_krz,
+                        "teacher_email": (t_email or "").strip().lower(),
                         "classes": set(),
                     }
                 course_meta[key]["classes"].add(class_name)
@@ -658,9 +657,12 @@ class MoodlePlugin(PluginBase):
                 except MoodleApiError as exc:
                     warnings.warn(f"Einschreibungen für {shortname}: {exc}")
 
-            # Lehrer-Einschreibung (Email-basiert, analog M365)
-            teacher_surname = teacher_name.strip().lower()
-            teacher_email = self._teacher_name_to_email.get(teacher_surname)
+            # Lehrer-Einschreibung (direkt über Email aus Kursdaten)
+            teacher_email = meta.get("teacher_email", "")
+            if not teacher_email:
+                # Fallback: Kürzel → Email
+                teacher_krz = meta.get("teacher_kuerzel", "")
+                teacher_email = self._kuerzel_to_email.get(teacher_krz, "")
             teacher_user = (
                 self._email_to_user.get(teacher_email) if teacher_email else None
             )
@@ -684,7 +686,7 @@ class MoodlePlugin(PluginBase):
                             "display_detail": "Trainer einschreiben",
                         }
                     )
-            elif teacher_surname:
+            elif teacher_name.strip():
                 if not teacher_email:
                     log.warning(
                         "Lehrer '%s' hat keine Email in SchILD — "

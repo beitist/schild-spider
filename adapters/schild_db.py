@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 # SQL-Queries — basierend auf SchILD-NRW-Schema (MariaDB)
 # ---------------------------------------------------------------------------
 
+_SQL_EIGENESCHULE = """
+    SELECT Schuljahr, SchuljahrAbschnitt
+    FROM eigeneschule
+    LIMIT 1
+"""
+
 _SQL_STUDENTS = """
     SELECT
         s.ID                AS school_internal_id,
@@ -25,9 +31,7 @@ _SQL_STUDENTS = """
         s.Name              AS last_name,
         s.Geburtsdatum      AS dob,
         s.SchulEmail        AS email,
-        s.Klasse            AS class_name,
-        s.AktSchuljahr      AS akt_schuljahr,
-        s.AktAbschnitt      AS akt_abschnitt
+        s.Klasse            AS class_name
     FROM schueler s
     WHERE s.Status = 2
     ORDER BY s.Name, s.Vorname
@@ -39,8 +43,12 @@ _SQL_STUDENTS = """
 _SQL_CLASS_TEACHERS = """
     SELECT
         v.Klasse              AS class_name,
+        v.KlassenlehrerKrz    AS teacher_1_krz,
         kl1.Nachname          AS teacher_1,
-        kl2.Nachname          AS teacher_2
+        kl1.EMailDienstlich   AS teacher_1_email,
+        v.StvKlassenlehrerKrz AS teacher_2_krz,
+        kl2.Nachname          AS teacher_2,
+        kl2.EMailDienstlich   AS teacher_2_email
     FROM versetzung v
     LEFT JOIN k_lehrer kl1 ON v.KlassenlehrerKrz = kl1.Kuerzel
     LEFT JOIN k_lehrer kl2 ON v.StvKlassenlehrerKrz = kl2.Kuerzel
@@ -64,6 +72,7 @@ _SQL_LEISTUNGSDATEN = """
         ld.FachLehrer                     AS fachlehrer_krz,
         f.Zeugnisbez                      AS course_name,
         kl.Nachname                       AS teacher_name,
+        kl.EMailDienstlich                AS fachlehrer_email,
         ld.Kurs_ID                        AS kurs_id,
         ku.KurzBez                        AS kurs_bezeichnung,
         ku.Zeugnisbez                     AS kurs_zeugnisbez,
@@ -266,21 +275,21 @@ class SchildDbAdapter(AdapterBase):
                 hierarchy_by_class[klass] = h
 
         # 4. Kurszuordnungen laden — Zwei-Schritt-Verfahren
-        # Schuljahr/Abschnitt: Config-Wert oder Fallback aus Schülerdaten
+        # Schuljahr/Abschnitt: Config-Wert oder Fallback aus eigeneschule
         schuljahr = self.schuljahr.strip()
         abschnitt = self.abschnitt.strip()
         if not schuljahr or not abschnitt:
-            for raw in raw_students:
-                sj = str(raw.get("akt_schuljahr") or "").strip()
-                ab = str(raw.get("akt_abschnitt") or "").strip()
-                if sj and ab:
-                    if not schuljahr:
-                        schuljahr = sj
-                    if not abschnitt:
-                        abschnitt = ab
-                    break
+            cursor.execute(_SQL_EIGENESCHULE)
+            es_row = cursor.fetchone()
+            if es_row:
+                es_cols = [col[0] for col in cursor.description]
+                es = dict(zip(es_cols, es_row))
+                if not schuljahr:
+                    schuljahr = str(es.get("Schuljahr") or "").strip()
+                if not abschnitt:
+                    abschnitt = str(es.get("SchuljahrAbschnitt") or "").strip()
             log.info(
-                "Schuljahr/Abschnitt aus Config leer → Fallback aus Schülerdaten:"
+                "Schuljahr/Abschnitt aus Config leer → Fallback aus eigeneschule:"
                 " Schuljahr=%s, Halbjahr=%s",
                 schuljahr,
                 abschnitt,
@@ -337,6 +346,8 @@ class SchildDbAdapter(AdapterBase):
                     kurs_bezeichnung=(c.get("kurs_bezeichnung") or "").strip(),
                     kurs_zeugnisbez=(c.get("kurs_zeugnisbez") or "").strip(),
                     kursart=(c.get("kursart") or "").strip(),
+                    teacher_kuerzel=krz,
+                    teacher_email=(c.get("fachlehrer_email") or "").strip(),
                 )
                 courses_by_student.setdefault(sid, []).append(assignment)
 
@@ -423,6 +434,10 @@ class SchildDbAdapter(AdapterBase):
                     photo_path=photos_by_sid.get(sid),
                     class_teacher_1=(ct.get("teacher_1") or "").strip(),
                     class_teacher_2=(ct.get("teacher_2") or "").strip(),
+                    class_teacher_1_krz=(ct.get("teacher_1_krz") or "").strip(),
+                    class_teacher_2_krz=(ct.get("teacher_2_krz") or "").strip(),
+                    class_teacher_1_email=(ct.get("teacher_1_email") or "").strip(),
+                    class_teacher_2_email=(ct.get("teacher_2_email") or "").strip(),
                     abteilung=(hier.get("abteilung") or "").strip(),
                     fachklasse=(hier.get("fachklasse") or "").strip(),
                     schulgliederung=(hier.get("schulgliederung") or "").strip(),
