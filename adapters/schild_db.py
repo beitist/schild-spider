@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import tempfile
 import warnings
 
@@ -10,6 +11,8 @@ from core.models import (
     StudentRecord,
     TeacherRecord,
 )
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SQL-Queries — basierend auf SchILD-NRW-Schema (MariaDB)
@@ -268,6 +271,21 @@ class SchildDbAdapter(AdapterBase):
                 kursart=c.get("kursart", "") or "",
             )
             courses_by_student.setdefault(sid, []).append(assignment)
+
+        # Diagnostik: Kurse/Lehrer-Daten
+        total_courses = sum(len(v) for v in courses_by_student.values())
+        with_teacher = sum(
+            1 for clist in courses_by_student.values() for c in clist if c.teacher_name
+        )
+        log.info(
+            "Kurse geladen: %d Zuordnungen für %d Schüler, davon %d mit Lehrkraft"
+            " (Schuljahr=%s, Abschnitt=%s)",
+            total_courses,
+            len(courses_by_student),
+            with_teacher,
+            self.schuljahr,
+            self.abschnitt,
+        )
 
         # 5. Fotos laden
         student_ids = [

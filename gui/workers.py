@@ -40,6 +40,17 @@ class LoadWorker(QObject):
                 students = adapter.load()
                 self._emit(f"{len(students)} Schüler geladen.")
 
+                # Kurs-Statistik (Diagnostik für LuL-Gruppen)
+                total_courses = sum(len(s.courses) for s in students)
+                if total_courses:
+                    with_teacher = sum(
+                        1 for s in students for c in s.courses if c.teacher_name
+                    )
+                    self._emit(
+                        f"  Kurse: {total_courses} Zuordnungen, "
+                        f"{with_teacher} mit Lehrkraft"
+                    )
+
                 # Debug-Klassenfilter
                 class_filter = (
                     (self.settings.get("debug_class_filter", "") or "").strip().lower()

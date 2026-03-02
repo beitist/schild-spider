@@ -674,6 +674,23 @@ class M365Plugin(PluginBase):
         for cn in sorted(classes):
             log.info("  %s: %d Schüler", cn, len(classes[cn]))
 
+        # --- Debug: Kurs-Statistik pro Klasse ---
+        total_courses = sum(
+            len(s.get("courses", [])) for stu_list in classes.values() for s in stu_list
+        )
+        courses_with_teacher = sum(
+            1
+            for stu_list in classes.values()
+            for s in stu_list
+            for c in s.get("courses", [])
+            if (c.get("teacher_name") if isinstance(c, dict) else c.teacher_name)
+        )
+        log.info(
+            "=== Kurs-Statistik: %d Zuordnungen gesamt, %d mit Lehrkraft ===",
+            total_courses,
+            courses_with_teacher,
+        )
+
         # --- Debug: LuL pro Klasse (aus Kursdaten + Klassenlehrer) ---
         log.info("=== LuL pro Klasse (aus SchILD-Daten) ===")
         for cn, students_in_class in sorted(classes.items()):
