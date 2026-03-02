@@ -46,25 +46,35 @@ _SQL_CLASS_TEACHERS = """
     LEFT JOIN k_lehrer kl2 ON v.StvKlassenlehrerKrz = kl2.Kuerzel
 """
 
-# Leistungsdaten: schuelerlernabschnittsdaten verknüpft Schuljahr (Jahr)
-# + Halbjahr (Abschnitt). schuelerleistungsdaten hängt via Abschnitt_ID dran.
-# eigeneschule_faecher → Zeugnisbez (nicht Bezeichnung!)
-_SQL_COURSES = """
+# Leistungsdaten — Zwei-Schritt-Verfahren:
+# 1. Lernabschnitt-IDs für das Schuljahr/Halbjahr ermitteln
+# 2. Leistungsdaten (Fächer/Kurse) über Abschnitt_ID laden
+
+_SQL_ABSCHNITT_IDS = """
     SELECT
-        la.Schueler_ID                    AS student_id,
+        la.ID           AS abschnitt_id,
+        la.Schueler_ID  AS student_id
+    FROM schuelerlernabschnittsdaten la
+    WHERE la.Jahr = %s AND la.Abschnitt = %s
+"""
+
+_SQL_LEISTUNGSDATEN = """
+    SELECT
+        ld.Abschnitt_ID                   AS abschnitt_id,
+        ld.FachLehrer                     AS fachlehrer_krz,
         f.Zeugnisbez                      AS course_name,
-        COALESCE(kl.Nachname, kl2.Nachname) AS teacher_name,
-        ld.Kurs_ID                        AS course_id,
+        kl.Nachname                       AS teacher_name,
+        ld.Kurs_ID                        AS kurs_id,
         ku.KurzBez                        AS kurs_bezeichnung,
         ku.Zeugnisbez                     AS kurs_zeugnisbez,
+        kl2.Nachname                      AS kurs_teacher_name,
         ld.KursartAllg                    AS kursart
     FROM schuelerleistungsdaten ld
-    JOIN schuelerlernabschnittsdaten la ON ld.Abschnitt_ID = la.ID
     LEFT JOIN eigeneschule_faecher f   ON ld.Fach_ID = f.ID
     LEFT JOIN k_lehrer kl              ON ld.FachLehrer = kl.Kuerzel
     LEFT JOIN Kurse ku                 ON ld.Kurs_ID = ku.ID
     LEFT JOIN k_lehrer kl2             ON ku.LehrerKrz = kl2.Kuerzel
-    WHERE la.Jahr = %s AND la.Abschnitt = %s
+    WHERE ld.Abschnitt_ID IN ({placeholders})
 """
 
 _SQL_TEACHERS = """
@@ -255,22 +265,66 @@ class SchildDbAdapter(AdapterBase):
             if klass and klass not in hierarchy_by_class:
                 hierarchy_by_class[klass] = h
 
-        # 4. Kurszuordnungen laden (parametrisiert mit Schuljahr + Abschnitt)
-        cursor.execute(_SQL_COURSES, (self.schuljahr, self.abschnitt))
-        course_cols = [col[0] for col in cursor.description]
-        courses_by_student: dict[str, list[CourseAssignment]] = {}
+        # 4. Kurszuordnungen laden — Zwei-Schritt-Verfahren
+        # 4a: Abschnitt-IDs für das Schuljahr/Halbjahr ermitteln
+        cursor.execute(_SQL_ABSCHNITT_IDS, (self.schuljahr, self.abschnitt))
+        abschnitt_cols = [col[0] for col in cursor.description]
+        abschnitt_to_student: dict[int, str] = {}
         for row in cursor.fetchall():
-            c = dict(zip(course_cols, row))
-            sid = str(c["student_id"])
-            assignment = CourseAssignment(
-                course_name=c.get("course_name", "") or "",
-                teacher_name=c.get("teacher_name", "") or "",
-                course_id=str(c.get("course_id", "") or ""),
-                kurs_bezeichnung=c.get("kurs_bezeichnung", "") or "",
-                kurs_zeugnisbez=c.get("kurs_zeugnisbez", "") or "",
-                kursart=c.get("kursart", "") or "",
+            r = dict(zip(abschnitt_cols, row))
+            abschnitt_to_student[r["abschnitt_id"]] = str(r["student_id"])
+
+        log.info(
+            "Lernabschnitte: %d Abschnitte für Schuljahr=%s, Halbjahr=%s",
+            len(abschnitt_to_student),
+            self.schuljahr,
+            self.abschnitt,
+        )
+
+        # 4b: Leistungsdaten für diese Abschnitte laden
+        courses_by_student: dict[str, list[CourseAssignment]] = {}
+        if abschnitt_to_student:
+            abschnitt_ids = list(abschnitt_to_student.keys())
+            placeholders = ",".join(["%s"] * len(abschnitt_ids))
+            sql = _SQL_LEISTUNGSDATEN.replace("{placeholders}", placeholders)
+            cursor.execute(sql, abschnitt_ids)
+            course_cols = [col[0] for col in cursor.description]
+
+            raw_fachlehrer_count = 0
+            raw_fachlehrer_empty = 0
+
+            for row in cursor.fetchall():
+                c = dict(zip(course_cols, row))
+                sid = abschnitt_to_student.get(c["abschnitt_id"])
+                if not sid:
+                    continue
+
+                # Diagnostik: FachLehrer-Kürzel zählen
+                krz = (c.get("fachlehrer_krz") or "").strip()
+                raw_fachlehrer_count += 1
+                if not krz:
+                    raw_fachlehrer_empty += 1
+
+                # Lehrkraft: FachLehrer bevorzugt, Fallback auf Kurs-Lehrer
+                teacher = (c.get("teacher_name") or "").strip() or (
+                    c.get("kurs_teacher_name") or ""
+                ).strip()
+
+                assignment = CourseAssignment(
+                    course_name=(c.get("course_name") or "").strip(),
+                    teacher_name=teacher,
+                    course_id=str(c.get("kurs_id") or ""),
+                    kurs_bezeichnung=(c.get("kurs_bezeichnung") or "").strip(),
+                    kurs_zeugnisbez=(c.get("kurs_zeugnisbez") or "").strip(),
+                    kursart=(c.get("kursart") or "").strip(),
+                )
+                courses_by_student.setdefault(sid, []).append(assignment)
+
+            log.info(
+                "Leistungsdaten: %d Zeilen, davon %d ohne FachLehrer-Kürzel",
+                raw_fachlehrer_count,
+                raw_fachlehrer_empty,
             )
-            courses_by_student.setdefault(sid, []).append(assignment)
 
         # Diagnostik: Kurse/Lehrer-Daten
         total_courses = sum(len(v) for v in courses_by_student.values())
