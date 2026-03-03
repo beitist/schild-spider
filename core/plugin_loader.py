@@ -19,6 +19,7 @@ _PLUGIN_REGISTRY: dict[str, tuple[str, str]] = {
     "hagen_id": ("plugins.hagen_id", "HagenIdPlugin"),
     "m365": ("plugins.m365", "M365Plugin"),
     "moodle": ("plugins.moodle", "MoodlePlugin"),
+    "webuntis": ("plugins.webuntis", "WebUntisPlugin"),
 }
 
 
@@ -87,7 +88,7 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 
 # Wird bei jeder strukturellen Änderung am Settings-Schema hochgezählt.
 # load_settings() prüft dies und migriert automatisch.
-SETTINGS_VERSION = 8
+SETTINGS_VERSION = 9
 
 
 def generate_default_settings(

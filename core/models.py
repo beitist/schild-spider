@@ -28,6 +28,7 @@ class StudentRecord:
     email: str
     class_name: str
     photo_path: str | None = None
+    gender: str = ""  # Geschlecht (SchILD: "3"=m, "4"=w, "5"=d, "6"=ohne)
     # Klassenlehrer (aus Klassen-Tabelle, denormalisiert auf Schüler)
     class_teacher_1: str = ""
     class_teacher_2: str = ""

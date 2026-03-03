@@ -31,3 +31,4 @@ internal/
 
 *.log
 *.csv
+test_webuntis.py

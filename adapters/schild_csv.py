@@ -21,6 +21,7 @@ _STUDENT_FIELD_VARIANTS: dict[str, list[str]] = {
     "dob": ["Geburtsdatum", "Geb.-Datum", "GebDatum"],
     "email": ["E-Mail (Schule)", "E-Mail", "Email"],
     "class_name": ["Klasse", "Klassenbezeichnung"],
+    "gender": ["Geschlecht"],
 }
 
 _TEACHER_FIELD_VARIANTS: dict[str, list[str]] = {
@@ -214,6 +215,7 @@ class SchildCsvAdapter(AdapterBase):
                 email=_get_field_value("email", row, _STUDENT_FIELD_VARIANTS),
                 class_name=_get_field_value("class_name", row, _STUDENT_FIELD_VARIANTS),
                 photo_path=str(photo_path) if photo_path else None,
+                gender=_get_field_value("gender", row, _STUDENT_FIELD_VARIANTS),
             )
         except (KeyError, ValueError) as exc:
             warnings.warn(f"CSV Zeile {row_num} übersprungen: {exc}")

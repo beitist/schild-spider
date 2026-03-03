@@ -62,6 +62,15 @@ class PluginBase(ABC):
 
     # --- Optionales Interface ---
 
+    def pre_compute_files(self) -> list[dict]:
+        """Dateien die vor dem Compute per Filepicker gewählt werden müssen.
+
+        Returns: [{"key": "attribut_name", "label": "Dialog-Titel",
+                   "filter": "CSV (*.csv *.txt)"}]
+        Leere Liste = kein Filepicker nötig (Standard).
+        """
+        return []
+
     def enrich_preview(self, changeset: ChangeSet) -> None:
         """Reichert das ChangeSet mit Preview-Daten an (z.B. generierte Emails)."""
 

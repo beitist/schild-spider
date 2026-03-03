@@ -31,7 +31,8 @@ _SQL_STUDENTS = """
         s.Name              AS last_name,
         s.Geburtsdatum      AS dob,
         s.SchulEmail        AS email,
-        s.Klasse            AS class_name
+        s.Klasse            AS class_name,
+        s.Geschlecht        AS gender
     FROM schueler s
     WHERE s.Status = 2
     ORDER BY s.Name, s.Vorname
@@ -432,6 +433,7 @@ class SchildDbAdapter(AdapterBase):
                     email=(raw.get("email") or "").strip(),
                     class_name=class_name,
                     photo_path=photos_by_sid.get(sid),
+                    gender=str(raw.get("gender") or "").strip(),
                     class_teacher_1=(ct.get("teacher_1") or "").strip(),
                     class_teacher_2=(ct.get("teacher_2") or "").strip(),
                     class_teacher_1_krz=(ct.get("teacher_1_krz") or "").strip(),

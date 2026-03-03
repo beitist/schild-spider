@@ -4,6 +4,7 @@ import logging
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -345,6 +346,18 @@ class MainWindow(QMainWindow):
         plugin_config = self._settings.get("plugins", {}).get(plugin_key, {})
         plugin_instance = plugin_class.from_config(plugin_config)
         card.plugin_instance = plugin_instance
+
+        # Filepicker für Plugins die eine Eingabe-Datei brauchen
+        for req in plugin_instance.pre_compute_files():
+            path, _ = QFileDialog.getOpenFileName(
+                self, req["label"], "", req.get("filter", "")
+            )
+            if not path:
+                card.state = PluginCardState.IDLE
+                self._enable_all_actions()
+                self._progress.hide()
+                return
+            setattr(plugin_instance, req["key"], path)
 
         max_suspend = self._settings.get("failsafe", {}).get(
             "max_suspend_percentage", 15.0
