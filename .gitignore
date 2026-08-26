@@ -32,3 +32,5 @@ internal/
 *.log
 *.csv
 test_webuntis.py
+.env
+csv-generieren.py

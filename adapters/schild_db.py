@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import logging
+import shutil
 import tempfile
 import warnings
+from pathlib import Path
 
 from adapters.base import AdapterBase
 from core.models import (
@@ -13,6 +16,18 @@ from core.models import (
 )
 
 log = logging.getLogger(__name__)
+
+# Fotos aus der DB werden hier zwischengespeichert (statt verstreuter,
+# nie gelöschter NamedTemporaryFiles). Wird bei jedem load() geleert
+# und beim Programmende komplett entfernt (Datenschutz).
+_PHOTO_TMP_DIR = Path(tempfile.gettempdir()) / "schild-spider-photos"
+
+
+def _cleanup_photo_dir() -> None:
+    shutil.rmtree(_PHOTO_TMP_DIR, ignore_errors=True)
+
+
+atexit.register(_cleanup_photo_dir)
 
 # ---------------------------------------------------------------------------
 # SQL-Queries — basierend auf SchILD-NRW-Schema (MariaDB)
@@ -230,6 +245,11 @@ class SchildDbAdapter(AdapterBase):
             user=self.db_user,
             password=self.db_password,
             charset="utf8mb4",
+            # Timeouts: nicht erreichbarer Server soll die GUI nicht
+            # minutenlang einfrieren; Read großzügig wegen Foto-BLOBs.
+            connect_timeout=8,
+            read_timeout=120,
+            write_timeout=120,
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -517,12 +537,18 @@ class SchildDbAdapter(AdapterBase):
 
     @staticmethod
     def _load_photos(cursor, student_ids: list[str]) -> dict[str, str]:
-        """Lädt Fotos aus schuelerfotos und speichert als temp-Dateien.
+        """Lädt Fotos aus schuelerfotos und speichert sie als Temp-Dateien.
 
+        Die Dateien liegen in einem eigenen Verzeichnis, das vor jedem
+        Lauf geleert wird — so sammeln sich keine alten Fotos an.
         Gibt ein Dict {student_id: temp_file_path} zurück.
         """
         if not student_ids:
             return {}
+
+        # Reste vom letzten Lauf (oder Absturz) entfernen
+        _cleanup_photo_dir()
+        _PHOTO_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
         placeholders = ",".join(["%s"] * len(student_ids))
         sql = _SQL_PHOTOS.replace("{placeholders}", placeholders)
@@ -536,13 +562,9 @@ class SchildDbAdapter(AdapterBase):
             blob = p.get("photo_blob")
             if not blob:
                 continue
-            # MEDIUMBLOB als temporäre Datei speichern
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=".jpg", prefix=f"schild_photo_{sid}_", delete=False
-            )
-            tmp.write(blob)
-            tmp.close()
-            photos[sid] = tmp.name
+            photo_file = _PHOTO_TMP_DIR / f"{sid}.jpg"
+            photo_file.write_bytes(blob)
+            photos[sid] = str(photo_file)
 
         return photos
 

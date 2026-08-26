@@ -75,6 +75,8 @@ class MainWindow(QMainWindow):
         self._worker: object | None = None
         self._worker_thread: QThread | None = None
         self._pending_write_back: list[dict] = []
+        self._apply_stats: dict[str, tuple[int, int]] = {}  # key → (ok, fehler)
+        self._apply_had_error = False
 
         self._build_ui()
         self._load_settings()
@@ -172,13 +174,18 @@ class MainWindow(QMainWindow):
         self._log.setStyleSheet("font-family: monospace; font-size: 12px;")
         right_splitter.addWidget(self._log)
 
-        # Python-Logging → GUI-Log weiterleiten (thread-safe via Qt-Signal)
+        # Python-Logging → GUI-Log weiterleiten (thread-safe via Qt-Signal).
+        # INFO-Level: DEBUG (z.B. jeder einzelne Graph-Request) bleibt in
+        # spider.log, würde das GUI-Log aber unlesbar machen.
+        # "gui" NICHT anhängen — die Worker senden ihre Meldungen bereits
+        # direkt per log_signal, sonst erschiene alles doppelt.
         self._log_bridge = _LogSignalBridge()
         self._log_bridge.message.connect(self._log_msg)
         self._log_handler = _QtLogHandler(self._log_bridge)
         self._log_handler.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
-        self._log_handler.setLevel(logging.DEBUG)
-        logging.getLogger("core").addHandler(self._log_handler)
+        self._log_handler.setLevel(logging.INFO)
+        for logger_name in ("core", "plugins", "adapters"):
+            logging.getLogger(logger_name).addHandler(self._log_handler)
 
         right_splitter.setSizes([400, 200])
         main_splitter.addWidget(right_splitter)
@@ -395,7 +402,8 @@ class MainWindow(QMainWindow):
         if changeset.requires_force:
             self._log_msg(
                 f"\n\u26a0 FAILSAFE: {card.display_name} \u2014 "
-                f"{changeset.suspend_percentage}% Abmeldungen! Anwenden blockiert."
+                f"{changeset.suspend_percentage}% Abmeldungen! "
+                f"Anwenden erfordert explizite Best\u00e4tigung."
             )
 
         has_changes = (
@@ -405,9 +413,9 @@ class MainWindow(QMainWindow):
             or changeset.photo_updates
             or changeset.group_changes
         )
-        if has_changes and not changeset.requires_force:
+        if has_changes:
             self._log_msg("Vorschau bereit. Pr\u00fcfe die \u00c4nderungen.")
-        elif not has_changes:
+        else:
             self._log_msg("Keine \u00c4nderungen gefunden. Alles synchron.")
 
         if self._selected_card_key == plugin_key:
@@ -423,31 +431,18 @@ class MainWindow(QMainWindow):
         card = self._plugin_cards[plugin_key]
         if card.changeset is None:
             return
-        if card.changeset.requires_force:
-            QMessageBox.warning(
-                self,
-                "Failsafe",
-                f"Abmeldungen \u00fcberschreiten den Schwellwert "
-                f"({card.changeset.suspend_percentage}%).\n\n"
-                f"Bitte pr\u00fcfe die SchILD-Daten auf Vollst\u00e4ndigkeit.",
-            )
-            return
 
-        reply = QMessageBox.question(
-            self,
-            "\u00c4nderungen anwenden?",
-            f"Sollen die \u00c4nderungen f\u00fcr "
-            f"'{card.display_name}' jetzt angewendet werden?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        # Erst filtern (abgew\u00e4hlte Eintr\u00e4ge raus), dann best\u00e4tigen \u2014
+        # so z\u00e4hlt die Failsafe-Quote nur die tats\u00e4chlich anzuwendenden
+        # Abmeldungen.
+        filtered_cs = self._build_filtered_changeset(card)
+        if not self._confirm_apply(card, filtered_cs):
             return
 
         card.state = PluginCardState.APPLYING
         self._disable_all_actions()
         self._progress.show()
-
-        filtered_cs = self._build_filtered_changeset(card)
+        self._apply_had_error = False
 
         # Gecachte Plugin-Instanz aus Compute-Phase verwenden
         # (enthält Token, User-Cache, Gruppen-Cache etc.)
@@ -464,6 +459,7 @@ class MainWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.log_signal.connect(self._log_msg)
         worker.write_back_ready.connect(self._on_write_back_ready)
+        worker.summary_ready.connect(self._on_apply_summary)
         worker.error.connect(self._on_plugin_worker_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(lambda k, m: thread.quit())
@@ -475,21 +471,44 @@ class MainWindow(QMainWindow):
         self._worker_thread = thread
         thread.start()
 
+    def _on_apply_summary(self, plugin_key: str, ok: int, fail: int) -> None:
+        """Empf\u00e4ngt die OK/Fehler-Z\u00e4hlung vom Apply-Worker."""
+        self._apply_stats[plugin_key] = (ok, fail)
+
     def _on_plugin_apply_done(self, plugin_key: str) -> None:
         self._progress.hide()
         self._enable_all_actions()
+
+        # Nach einem Abbruch (Exception) hat _on_plugin_worker_error bereits
+        # den Fehlerdialog gezeigt \u2014 kein zus\u00e4tzlicher "Fertig"-Dialog.
+        if self._apply_had_error:
+            return
 
         card = self._plugin_cards.get(plugin_key)
         if card:
             card.state = PluginCardState.APPLIED
 
         name = card.display_name if card else plugin_key
-        self._log_msg(f"\nSynchronisation f\u00fcr {name} abgeschlossen.")
-        QMessageBox.information(
-            self,
-            "Fertig",
-            f"Synchronisation f\u00fcr {name} erfolgreich abgeschlossen.",
-        )
+        ok, fail = self._apply_stats.pop(plugin_key, (0, 0))
+
+        if fail:
+            self._log_msg(
+                f"\nSynchronisation f\u00fcr {name} abgeschlossen: {ok} OK, {fail} Fehler."
+            )
+            QMessageBox.warning(
+                self,
+                "Abgeschlossen mit Fehlern",
+                f"Synchronisation f\u00fcr {name} abgeschlossen:\n"
+                f"{ok} OK, {fail} Fehler.\n\n"
+                f"Details stehen im Log.",
+            )
+        else:
+            self._log_msg(f"\nSynchronisation f\u00fcr {name} abgeschlossen.")
+            QMessageBox.information(
+                self,
+                "Fertig",
+                f"Synchronisation f\u00fcr {name} erfolgreich abgeschlossen.",
+            )
 
     # --- Vorschau-Tree mit Checkboxen ---
 
@@ -828,6 +847,10 @@ class MainWindow(QMainWindow):
             ok = sum(1 for r in results if r.get("success"))
             fail = len(results) - ok
             self._log_msg(f"Write-back: {ok} OK, {fail} Fehler")
+            for r in results:
+                if not r.get("success"):
+                    sid = r.get("school_internal_id", "?")
+                    self._log_msg(f"  ✗ {sid}: {r.get('message', '')}")
 
             # Dateipfad anzeigen (CSV-Adapter gibt Pfad in message zur\u00fcck)
             for r in results:
@@ -870,6 +893,60 @@ class MainWindow(QMainWindow):
 
     # --- Helpers ---
 
+    def _confirm_apply(self, card: PluginCard, filtered_cs: ChangeSet) -> bool:
+        """Bestätigungs-Dialoge vor dem Anwenden, inkl. Failsafe-Override.
+
+        Die Failsafe-Quote wird über das GEFILTERTE ChangeSet berechnet —
+        wer Abmeldungen in der Vorschau abwählt, senkt die Quote.
+        Oberhalb von max_suspend_percentage ist eine explizite Bestätigung
+        nötig, oberhalb von require_confirmation_above eine doppelte.
+        """
+        failsafe = self._settings.get("failsafe", {})
+        max_suspend = float(failsafe.get("max_suspend_percentage", 15))
+        confirm_above = float(failsafe.get("require_confirmation_above", 50))
+
+        total_target = filtered_cs.total_in_target
+        n_suspend = len(filtered_cs.suspended)
+        eff_pct = (n_suspend / total_target * 100) if total_target else 0.0
+
+        if eff_pct > max_suspend:
+            reply = QMessageBox.warning(
+                self,
+                "Failsafe: Viele Abmeldungen",
+                f"{n_suspend} Abmeldungen = {eff_pct:.1f}% der Konten im "
+                f"Zielsystem (Schwellwert: {max_suspend:.0f}%).\n\n"
+                f"Das kann auf einen unvollständigen SchILD-Export "
+                f"hindeuten — bitte prüfe die Quelldaten.\n\n"
+                f"Änderungen für '{card.display_name}' trotzdem anwenden?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+
+            if eff_pct > confirm_above:
+                reply = QMessageBox.critical(
+                    self,
+                    "Failsafe: Bitte noch einmal bestätigen",
+                    f"Es würden {n_suspend} von {total_target} Konten "
+                    f"deaktiviert ({eff_pct:.1f}%).\n\n"
+                    f"Wirklich fortfahren?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return False
+
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Änderungen anwenden?",
+            f"Sollen die Änderungen für '{card.display_name}' jetzt angewendet werden?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _build_filtered_changeset(self, card: PluginCard) -> ChangeSet:
         cs = card.changeset
         excluded = card.excluded_ids
@@ -903,6 +980,7 @@ class MainWindow(QMainWindow):
             card.refresh_buttons()
 
     def _on_plugin_worker_error(self, plugin_key: str, msg: str) -> None:
+        self._apply_had_error = True
         self._progress.hide()
         self._enable_all_actions()
 

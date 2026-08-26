@@ -7,13 +7,12 @@ import logging.handlers
 import queue
 import sys
 import threading
-from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from core.paths import asset_path
+from core.paths import asset_path, data_dir, settings_path
 from gui.mainwindow import MainWindow
 
 # --- App-Metadaten ---
@@ -91,8 +90,15 @@ def _setup_logging() -> None:
     date_format = "%Y-%m-%d %H:%M:%S"
     formatter = logging.Formatter(log_format, datefmt=date_format)
 
+    # Logs liegen neben der EXE bzw. im User-Datenverzeichnis, wenn der
+    # EXE-Ordner schreibgeschützt ist (z.B. "Program Files") — sonst
+    # würde die App hier beim Start mit PermissionError sterben.
+    log_dir = data_dir()
+
     # Eigentliche Handler (werden nur vom QueueListener-Thread bedient)
-    file_handler = logging.FileHandler("spider.log", mode="w", encoding="utf-8")
+    file_handler = logging.FileHandler(
+        log_dir / "spider.log", mode="w", encoding="utf-8"
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
 
@@ -126,7 +132,7 @@ def _setup_logging() -> None:
 
     # faulthandler: schreibt nativen Crash-Traceback (Segfault etc.) in eigene Datei.
     # File-Handle wird als Attribut gespeichert damit er nicht vom GC geschlossen wird.
-    _setup_logging._crash_fh = open("spider_crash.log", "w")  # noqa: SIM115
+    _setup_logging._crash_fh = open(log_dir / "spider_crash.log", "w")  # noqa: SIM115
     faulthandler.enable(file=_setup_logging._crash_fh)
 
 
@@ -179,7 +185,7 @@ def main() -> None:
         splash = None
 
     # --- Erststart: Setup-Wizard wenn keine settings.json vorhanden ---
-    if not Path("settings.json").exists():
+    if not settings_path().exists():
         # Splash ausblenden bevor der Wizard erscheint
         if splash is not None:
             splash.close()

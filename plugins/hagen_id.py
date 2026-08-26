@@ -13,6 +13,10 @@ _BATCH_SIZE_NEW = 200
 _BATCH_SIZE_CHANGE = 200
 _BATCH_SIZE_SUSPEND = 500
 
+# (connect, read) — Read großzügig, weil Batches mit base64-Fotos groß werden
+_TIMEOUT_MANIFEST = (10, 60)
+_TIMEOUT_SYNC = (10, 180)
+
 
 class HagenIdPlugin(PluginBase):
     """Output-Plugin für das Hagen-ID Schülerausweis-System (REST API)."""
@@ -74,7 +78,9 @@ class HagenIdPlugin(PluginBase):
     # --- Sync-Interface ---
 
     def get_manifest(self) -> list[dict]:
-        resp = self._session.get(f"{self.api_url}/api/sync/manifest")
+        resp = self._session.get(
+            f"{self.api_url}/api/sync/manifest", timeout=_TIMEOUT_MANIFEST
+        )
         resp.raise_for_status()
         data = resp.json()
         return data.get("students", [])
@@ -95,7 +101,9 @@ class HagenIdPlugin(PluginBase):
         results = []
         for batch in _batched(students, _BATCH_SIZE_NEW):
             payload = {"students": [self._prepare_student(s) for s in batch]}
-            resp = self._session.post(f"{self.api_url}/api/sync/new", json=payload)
+            resp = self._session.post(
+                f"{self.api_url}/api/sync/new", json=payload, timeout=_TIMEOUT_SYNC
+            )
             resp.raise_for_status()
             results.extend(resp.json().get("results", []))
         return results
@@ -104,7 +112,9 @@ class HagenIdPlugin(PluginBase):
         results = []
         for batch in _batched(students, _BATCH_SIZE_CHANGE):
             payload = {"students": [self._prepare_student(s) for s in batch]}
-            resp = self._session.post(f"{self.api_url}/api/sync/change", json=payload)
+            resp = self._session.post(
+                f"{self.api_url}/api/sync/change", json=payload, timeout=_TIMEOUT_SYNC
+            )
             resp.raise_for_status()
             results.extend(resp.json().get("results", []))
         return results
@@ -113,7 +123,9 @@ class HagenIdPlugin(PluginBase):
         results = []
         for batch in _batched(school_internal_ids, _BATCH_SIZE_SUSPEND):
             payload = {"school_internal_ids": batch}
-            resp = self._session.post(f"{self.api_url}/api/sync/suspend", json=payload)
+            resp = self._session.post(
+                f"{self.api_url}/api/sync/suspend", json=payload, timeout=_TIMEOUT_SYNC
+            )
             resp.raise_for_status()
             results.extend(resp.json().get("results", []))
         return results

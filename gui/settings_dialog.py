@@ -128,6 +128,7 @@ class SettingsDialog(QDialog):
     def _populate_adapters(self) -> None:
         registry = get_adapter_registry()
         adapter_cfg = self._settings.get("adapter", {})
+        adapter_configs = self._settings.get("adapter_configs", {})
         current_type = adapter_cfg.get("type", "schild_csv")
 
         for key, (module_path, class_name) in registry.items():
@@ -137,7 +138,12 @@ class SettingsDialog(QDialog):
 
             self._cmb_adapter.addItem(adapter_class.adapter_name(), key)
 
-            config = adapter_cfg if adapter_cfg.get("type") == key else {}
+            # Aktiver Adapter: flache Sektion (maßgeblich),
+            # andere Adapter: gespeicherte Config aus adapter_configs.
+            if adapter_cfg.get("type") == key:
+                config = adapter_cfg
+            else:
+                config = adapter_configs.get(key, {})
             page = _ConfigPage(
                 config_class=adapter_class,
                 config=config,
@@ -196,10 +202,14 @@ class SettingsDialog(QDialog):
         self._settings["school_name"] = self._txt_school.text().strip()
         self._settings["debug_class_filter"] = self._txt_class_filter.text().strip()
 
-        # Adapter
+        # Adapter: Configs ALLER Seiten sichern (überleben den Wechsel),
+        # der gewählte Adapter zusätzlich in die flache adapter-Sektion.
+        adapter_configs = self._settings.setdefault("adapter_configs", {})
+        for key, page in self._adapter_pages.items():
+            adapter_configs[key] = page.collect_config()
+
         adapter_key = self._cmb_adapter.currentData()
-        adapter_page = self._adapter_pages.get(adapter_key)
-        adapter_cfg = adapter_page.collect_config() if adapter_page else {}
+        adapter_cfg = dict(adapter_configs.get(adapter_key, {}))
         adapter_cfg["type"] = adapter_key
         self._settings["adapter"] = adapter_cfg
 

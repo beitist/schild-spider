@@ -21,15 +21,27 @@ log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Geschlecht-Mapping: SchILD → WebUntis CSV-Import
-# SchILD: "3" = männlich, "4" = weiblich, "5" = divers, "6" = ohne Angabe
+# DB-Adapter liefert SchILD-Codes ("3"=m, "4"=w, "5"=d, "6"=ohne),
+# der CSV-Export je nach SchILD-Konfiguration auch "m"/"w"/Langformen.
 # ---------------------------------------------------------------------------
 
-_SCHILD_GENDER_CSV: dict[str, str] = {
+_GENDER_CSV: dict[str, str] = {
     "3": "m",
+    "m": "m",
+    "männlich": "m",
+    "maennlich": "m",
     "4": "w",
+    "w": "w",
+    "weiblich": "w",
     "5": "d",
+    "d": "d",
+    "divers": "d",
     "6": "",
 }
+
+
+def _map_gender(raw: object) -> str:
+    return _GENDER_CSV.get(str(raw or "").strip().lower(), "")
 
 
 class WebUntisPlugin(PluginBase):
@@ -222,9 +234,7 @@ class WebUntisPlugin(PluginBase):
 
             for student in students:
                 sid = student.get("school_internal_id", "")
-                gender_csv = _SCHILD_GENDER_CSV.get(
-                    str(student.get("gender", "")).strip(), ""
-                )
+                gender_csv = _map_gender(student.get("gender", ""))
 
                 # Geburtsdatum: ISO → deutsches Format (DD.MM.YYYY)
                 dob = student.get("dob", "")

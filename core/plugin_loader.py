@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from adapters.base import AdapterBase
+from core.paths import settings_path as default_settings_path
 from plugins.base import PluginBase
 
 # --- Registries ---
@@ -88,7 +89,8 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 
 # Wird bei jeder strukturellen Änderung am Settings-Schema hochgezählt.
 # load_settings() prüft dies und migriert automatisch.
-SETTINGS_VERSION = 9
+# v10: adapter_configs (Configs ALLER Adapter bleiben beim Wechsel erhalten)
+SETTINGS_VERSION = 10
 
 
 def generate_default_settings(
@@ -105,12 +107,20 @@ def generate_default_settings(
     if enabled_plugins is None:
         enabled_plugins = []
 
-    # Adapter-Defaults aus dem Schema der gewählten Adapter-Klasse
-    adapter_cfg: dict = {"type": adapter_type}
-    adapter_class = get_adapter_class(adapter_type)
-    if adapter_class is not None:
+    # Defaults für ALLE registrierten Adapter — so überlebt die Config
+    # eines Adapters den Wechsel auf einen anderen.
+    adapter_configs: dict = {}
+    for key in _ADAPTER_REGISTRY:
+        adapter_class = get_adapter_class(key)
+        if adapter_class is None:
+            continue
+        cfg: dict = {}
         for field in adapter_class.config_schema():
-            adapter_cfg.setdefault(field.key, field.default)
+            cfg.setdefault(field.key, field.default)
+        adapter_configs[key] = cfg
+
+    # Aktiver Adapter (flache Sektion, wird von load_adapter() gelesen)
+    adapter_cfg: dict = {"type": adapter_type, **adapter_configs.get(adapter_type, {})}
 
     # Plugin-Defaults aus den Schemata aller registrierten Plugins
     plugins_cfg: dict = {}
@@ -127,6 +137,7 @@ def generate_default_settings(
         "settings_version": SETTINGS_VERSION,
         "school_name": school_name,
         "adapter": adapter_cfg,
+        "adapter_configs": adapter_configs,
         "plugins": plugins_cfg,
         "failsafe": {
             "max_suspend_percentage": 15,
@@ -143,20 +154,36 @@ def migrate_settings(old_settings: dict) -> dict:
     werden entfernt. Die ``settings_version`` wird hochgesetzt.
     """
     # Neues Default-Skelett erzeugen
+    old_adapter_type = old_settings.get("adapter", {}).get("type", "schild_csv")
     new_settings = generate_default_settings(
         school_name=old_settings.get("school_name", ""),
-        adapter_type=old_settings.get("adapter", {}).get("type", "schild_csv"),
+        adapter_type=old_adapter_type,
     )
 
     # Top-Level-Felder übernehmen
     if "debug_class_filter" in old_settings:
         new_settings["debug_class_filter"] = old_settings["debug_class_filter"]
 
-    # Adapter-Config übernehmen (nur Felder die im neuen Schema existieren)
+    # Adapter-Configs übernehmen: erst gespeicherte adapter_configs (ab v10),
+    # dann die flache adapter-Sektion (überschreibt den aktiven Adapter —
+    # deckt auch Alt-Settings vor v10 ab).
+    old_configs = old_settings.get("adapter_configs", {})
     old_adapter = old_settings.get("adapter", {})
-    for key in new_settings["adapter"]:
-        if key in old_adapter:
-            new_settings["adapter"][key] = old_adapter[key]
+    for a_key, new_cfg in new_settings["adapter_configs"].items():
+        source = old_configs.get(a_key, {})
+        for field_key in new_cfg:
+            if field_key in source:
+                new_cfg[field_key] = source[field_key]
+        if a_key == old_adapter_type:
+            for field_key in new_cfg:
+                if field_key in old_adapter:
+                    new_cfg[field_key] = old_adapter[field_key]
+
+    # Flache adapter-Sektion aus der Config des aktiven Adapters aufbauen
+    new_settings["adapter"] = {
+        "type": old_adapter_type,
+        **new_settings["adapter_configs"].get(old_adapter_type, {}),
+    }
 
     # Plugin-Configs übernehmen (enabled-Status + Feld-Werte)
     old_plugins = old_settings.get("plugins", {})
@@ -177,13 +204,15 @@ def migrate_settings(old_settings: dict) -> dict:
     return new_settings
 
 
-def load_settings(settings_path: str | Path = "settings.json") -> dict:
+def load_settings(settings_path: str | Path | None = None) -> dict:
     """Lädt Settings und migriert bei Bedarf auf die aktuelle Version.
 
+    Ohne Pfad wird der Standard-Speicherort verwendet (neben der EXE
+    bzw. im Projektverzeichnis, siehe ``core.paths.settings_path``).
     Gibt FileNotFoundError zurück wenn keine settings.json existiert —
     der Aufrufer (main.py) zeigt dann den Setup-Wizard.
     """
-    path = Path(settings_path)
+    path = Path(settings_path) if settings_path else default_settings_path()
     if not path.exists():
         raise FileNotFoundError(f"Settings nicht gefunden: {path}")
     with open(path, encoding="utf-8") as f:
@@ -193,13 +222,14 @@ def load_settings(settings_path: str | Path = "settings.json") -> dict:
     stored_version = settings.get("settings_version", 0)
     if stored_version < SETTINGS_VERSION:
         settings = migrate_settings(settings)
-        save_settings(settings, settings_path)
+        save_settings(settings, path)
 
     return settings
 
 
-def save_settings(settings: dict, settings_path: str | Path = "settings.json") -> None:
+def save_settings(settings: dict, settings_path: str | Path | None = None) -> None:
     """Speichert Settings als JSON. Setzt immer die aktuelle Version."""
+    path = Path(settings_path) if settings_path else default_settings_path()
     settings["settings_version"] = SETTINGS_VERSION
-    with open(settings_path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=4, ensure_ascii=False)

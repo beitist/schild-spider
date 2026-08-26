@@ -24,7 +24,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 
 - **Hub-and-Spoke-Architektur** — Adapter lesen, Plugins schreiben, die Core-Engine berechnet den Diff
 - **Dry-Run-Prinzip** — Änderungen werden berechnet und in einer Vorschau angezeigt, bevor sie angewendet werden
-- **Failsafe-Schutz** — Blockiert automatisch bei >15% Deaktivierungen (Schutz vor unvollständigen Datenexporten)
+- **Failsafe-Schutz** — Bei >15% Deaktivierungen ist eine explizite Bestätigung nötig, bei >50% eine doppelte (Schutz vor unvollständigen Datenexporten)
 - **Plugin-System** — Jedes Plugin beschreibt sich selbst (Config-Felder, Verbindungstest), die GUI rendert dynamisch
 - **Adapter-System** — Verschiedene Datenquellen (CSV-Export, DB-Zugriff) über einheitliche Schnittstelle
 - **Email-Vorschau** — Generierte Email-Adressen werden vor dem Anwenden in der Vorschau angezeigt
@@ -49,7 +49,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 ### Voraussetzungen
 
 - Python 3.12+
-- Abhängigkeiten: `PySide6`, `requests`, `Pillow`, `PyMySQL` (optional: `pyodbc` für MS SQL)
+- Abhängigkeiten: `PySide6`, `requests`, `PyMySQL` (optional: `pyodbc` für MS SQL)
 
 ### Installation (Entwicklung)
 
@@ -257,4 +257,4 @@ git push origin main --tags
 
 [GPL v3](LICENSE)
 
-Abhängigkeiten unterliegen ihren eigenen Lizenzen (PySide6: LGPL v3, requests: Apache 2.0, Pillow: HPND).
+Abhängigkeiten unterliegen ihren eigenen Lizenzen (PySide6: LGPL v3, requests: Apache 2.0, PyMySQL: MIT).

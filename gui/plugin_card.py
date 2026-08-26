@@ -208,10 +208,9 @@ class PluginCard(QFrame):
             )
         )
 
-        can_apply = s == PluginCardState.COMPUTED
-        if can_apply and self._changeset is not None and self._changeset.requires_force:
-            can_apply = False
-        self._btn_apply.setEnabled(can_apply)
+        # Bei requires_force bleibt der Button aktiv — der Failsafe wird
+        # beim Klick über einen expliziten Bestätigungs-Dialog abgesichert.
+        self._btn_apply.setEnabled(s == PluginCardState.COMPUTED)
 
     def _update_summary(self) -> None:
         cs = self._changeset

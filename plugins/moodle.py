@@ -933,6 +933,19 @@ class MoodlePlugin(PluginBase):
                                 "message": ch["member_name"],
                             }
                         )
+                    else:
+                        results.append(
+                            {
+                                "action": "unenrol",
+                                "group": ch["group_name"],
+                                "success": False,
+                                "message": (
+                                    f"Kurs-ID unbekannt für "
+                                    f"'{ch.get('member_name', '')}' — "
+                                    f"Abmeldung übersprungen"
+                                ),
+                            }
+                        )
 
             except MoodleApiError as exc:
                 results.append(

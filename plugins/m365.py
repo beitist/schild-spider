@@ -247,6 +247,9 @@ class M365Plugin(PluginBase):
                 )
                 if email:
                     student["email"] = email
+                    # Markierung für apply_new: diese Email stammt von uns
+                    # (nicht aus SchILD) → gehört in den Write-back.
+                    student["_email_generated"] = True
                     preview_emails.add(email.lower())
 
     def apply_new(self, students: list[dict]) -> list[dict]:
@@ -258,6 +261,7 @@ class M365Plugin(PluginBase):
             sid = student["school_internal_id"]
             try:
                 email = (student.get("email") or "").strip()
+                was_generated = bool(student.get("_email_generated"))
                 if not email:
                     email = generate_email(
                         student.get("first_name", ""),
@@ -276,17 +280,20 @@ class M365Plugin(PluginBase):
                             }
                         )
                         continue
+                    was_generated = True
 
-                # Generierte Email für Write-back merken
-                self._generated_emails.append(
-                    {
-                        "school_internal_id": sid,
-                        "email": email,
-                        "first_name": student.get("first_name", ""),
-                        "last_name": student.get("last_name", ""),
-                        "class_name": student.get("class_name", ""),
-                    }
-                )
+                # Nur generierte Emails für Write-back merken — Adressen,
+                # die schon in SchILD stehen, müssen nicht zurück.
+                if was_generated:
+                    self._generated_emails.append(
+                        {
+                            "school_internal_id": sid,
+                            "email": email,
+                            "first_name": student.get("first_name", ""),
+                            "last_name": student.get("last_name", ""),
+                            "class_name": student.get("class_name", ""),
+                        }
+                    )
 
                 existing_emails.add(email.lower())
 
@@ -975,7 +982,9 @@ class M365Plugin(PluginBase):
         """Führt add_member/remove_member als Batch-Requests aus (max 20 pro Batch)."""
         _GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
         batch_limit = self._graph._BATCH_LIMIT
-        results: list[dict] = []
+        # Changes ohne auflösbare Gruppen-ID: als Fehler melden statt still
+        # zu überspringen (passiert z.B. wenn der Gruppen-Cache leer ist).
+        skipped: list[dict] = []
 
         # Batch-Requests vorbereiten: jedem Change eine Batch-Request-ID zuweisen
         prepared: list[tuple[dict, dict]] = []  # (change, batch_request)
@@ -993,6 +1002,18 @@ class M365Plugin(PluginBase):
                 )
                 group_id = cache.get(f"{template}|{ch['class_name']}")
                 if not group_id:
+                    skipped.append(
+                        {
+                            "action": action,
+                            "group": ch.get("group_name", ""),
+                            "success": False,
+                            "message": (
+                                f"Gruppen-ID unbekannt für "
+                                f"'{ch.get('member_name', '')}' — "
+                                f"bitte 'Berechnen' erneut ausführen"
+                            ),
+                        }
+                    )
                     continue
                 prepared.append(
                     (
@@ -1012,6 +1033,18 @@ class M365Plugin(PluginBase):
             elif action == "remove_member":
                 group_id = ch.get("group_id")
                 if not group_id:
+                    skipped.append(
+                        {
+                            "action": action,
+                            "group": ch.get("group_name", ""),
+                            "success": False,
+                            "message": (
+                                f"Gruppen-ID unbekannt für "
+                                f"'{ch.get('member_name', '')}' — "
+                                f"bitte 'Berechnen' erneut ausführen"
+                            ),
+                        }
+                    )
                     continue
                 prepared.append(
                     (
@@ -1026,6 +1059,7 @@ class M365Plugin(PluginBase):
 
         # In Batches à 20 aufteilen und absenden, 429er sammeln für Retry
         results, retry_items = self._send_batches(prepared, batch_limit)
+        results.extend(skipped)
 
         # Retry-Runde für gedrosselte Requests (max 2 Durchgänge)
         for retry_round in range(2):
@@ -1116,7 +1150,19 @@ class M365Plugin(PluginBase):
                     body = resp.get("body", {})
                     error = body.get("error", {})
                     msg = error.get("message", f"HTTP {status}")
-                    if "already exist" not in msg.lower():
+                    if "already exist" in msg.lower():
+                        # Mitglied ist schon in der Gruppe → Ziel erreicht
+                        results.append(
+                            {
+                                "action": ch["action"],
+                                "group": ch["group_name"],
+                                "success": True,
+                                "message": (
+                                    f"{ch.get('member_name', '')} (bereits vorhanden)"
+                                ),
+                            }
+                        )
+                    else:
                         results.append(
                             {
                                 "action": ch["action"],

@@ -159,6 +159,10 @@ class PluginApplyWorker(QObject):
     error = Signal(str, str)  # (plugin_key, error_message)
     log_signal = Signal(str)
     write_back_ready = Signal(str, list)  # (plugin_key, write_back_data)
+    summary_ready = Signal(str, int, int)  # (plugin_key, ok_gesamt, fehler_gesamt)
+
+    # Log-Obergrenze pro Phase, damit Massenfehler das Log nicht sprengen
+    _MAX_FAILURE_LINES = 20
 
     def __init__(
         self,
@@ -176,35 +180,63 @@ class PluginApplyWorker(QObject):
         log.info(msg)
         self.log_signal.emit(msg)
 
+    def _report_results(self, results: list) -> tuple[int, int]:
+        """Fasst Plugin-Ergebnisse zusammen und listet jeden Fehler im Log auf.
+
+        Returns: (ok_count, fail_count)
+        """
+        ok = sum(1 for r in results if r.get("success"))
+        failures = [r for r in results if not r.get("success")]
+        self._emit(f"  Ergebnis: {ok} OK, {len(failures)} Fehler")
+
+        for r in failures[: self._MAX_FAILURE_LINES]:
+            ident = r.get("school_internal_id") or r.get("group") or "?"
+            msg = r.get("message") or "Unbekannter Fehler"
+            self._emit(f"  ✗ {ident}: {msg}")
+        if len(failures) > self._MAX_FAILURE_LINES:
+            self._emit(
+                f"  ... und {len(failures) - self._MAX_FAILURE_LINES} weitere Fehler"
+            )
+
+        return ok, len(failures)
+
     @Slot()
     def run(self) -> None:
         try:
             cs = self.changeset
             phase = "init"
+            total_ok = 0
+            total_fail = 0
 
             if cs.new:
                 phase = f"apply_new ({len(cs.new)} Schüler)"
                 self._emit(f"Lege {len(cs.new)} neue Schüler an...")
-                results = self.plugin.apply_new(cs.new)
-                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
+                ok, fail = self._report_results(self.plugin.apply_new(cs.new))
+                total_ok += ok
+                total_fail += fail
 
             if cs.changed:
                 phase = f"apply_changes ({len(cs.changed)} Schüler)"
                 self._emit(f"Aktualisiere {len(cs.changed)} Schüler...")
-                results = self.plugin.apply_changes(cs.changed)
-                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
+                ok, fail = self._report_results(self.plugin.apply_changes(cs.changed))
+                total_ok += ok
+                total_fail += fail
 
             if cs.photo_updates:
                 phase = f"apply_photos ({len(cs.photo_updates)} Fotos)"
                 self._emit(f"Aktualisiere {len(cs.photo_updates)} Fotos...")
-                results = self.plugin.apply_changes(cs.photo_updates)
-                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
+                ok, fail = self._report_results(
+                    self.plugin.apply_changes(cs.photo_updates)
+                )
+                total_ok += ok
+                total_fail += fail
 
             if cs.suspended:
                 phase = f"apply_suspend ({len(cs.suspended)} Schüler)"
                 self._emit(f"Deaktiviere {len(cs.suspended)} Schüler...")
-                results = self.plugin.apply_suspend(cs.suspended)
-                self._emit(f"  Ergebnis: {len(results)} verarbeitet")
+                ok, fail = self._report_results(self.plugin.apply_suspend(cs.suspended))
+                total_ok += ok
+                total_fail += fail
 
             # Write-back-Daten prüfen und im Log anzeigen
             phase = "write_back_check"
@@ -228,13 +260,14 @@ class PluginApplyWorker(QObject):
             if cs.group_changes:
                 phase = f"apply_groups ({len(cs.group_changes)} Änderungen)"
                 self._emit(f"Wende {len(cs.group_changes)} Gruppenänderungen an...")
-                sync_results = self.plugin.apply_group_changes(cs.group_changes)
-                if sync_results:
-                    ok = sum(1 for r in sync_results if r.get("success"))
-                    fail = len(sync_results) - ok
-                    self._emit(f"  Gruppen: {ok} OK, {fail} Fehler")
+                ok, fail = self._report_results(
+                    self.plugin.apply_group_changes(cs.group_changes)
+                )
+                total_ok += ok
+                total_fail += fail
 
             phase = "done"
+            self.summary_ready.emit(self.plugin_key, total_ok, total_fail)
             self.finished.emit(self.plugin_key)
 
         except Exception as exc:
