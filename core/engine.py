@@ -52,13 +52,8 @@ def compute_changeset(
             changed.append(student)
 
         # Foto-Hash vergleichen (falls Foto vorhanden)
-        if student.get("photo_path"):
-            local_photo_hash = _compute_photo_hash_if_available(
-                plugin, student["photo_path"]
-            )
-            remote_photo_hash = target.get("photo_hash", "")
-            if local_photo_hash and local_photo_hash != remote_photo_hash:
-                photo_updates.append(student)
+        if student.get("photo_path") and plugin.needs_photo_update(student, target):
+            photo_updates.append(student)
 
     # Abgemeldete Schüler finden (im Zielsystem aber nicht mehr in SchILD)
     for sid, target in target_map.items():
@@ -82,10 +77,3 @@ def compute_changeset(
         suspend_percentage=round(suspend_pct, 1),
         requires_force=requires_force,
     )
-
-
-def _compute_photo_hash_if_available(plugin: PluginBase, photo_path: str) -> str | None:
-    """Berechnet den Photo-Hash über das Plugin, falls die Methode existiert."""
-    if hasattr(plugin, "compute_photo_hash"):
-        return plugin.compute_photo_hash(photo_path)
-    return None

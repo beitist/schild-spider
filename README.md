@@ -40,6 +40,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 | Adapter | SchILD CSV-Export | Verfügbar |
 | Adapter | SchILD DB (MariaDB/MySQL) | Verfügbar (inkl. Kurse/Fächer) |
 | Plugin | Hagen-ID (Schülerausweise) | Verfügbar |
+| Plugin | Hagen-ID (Lehrerausweise) | Verfügbar (nur DB-Adapter) |
 | Plugin | Microsoft 365 (Graph API) | Verfügbar |
 | Plugin | Moodle (REST API, SSO via OIDC) | Verfügbar |
 | Plugin | Untis | Geplant |
@@ -106,7 +107,8 @@ schild-spider/
 │
 ├── plugins/
 │   ├── base.py              # PluginBase (ABC)
-│   ├── hagen_id.py          # Hagen-ID REST API
+│   ├── hagen_id.py          # Hagen-ID REST API (Schüler)
+│   ├── hagen_id_lehrer.py   # Hagen-ID REST API (Lehrkräfte)
 │   ├── m365.py              # Microsoft 365 / Entra ID (Graph API)
 │   └── moodle.py            # Moodle (Web Services REST API)
 │
@@ -170,6 +172,18 @@ Falls Schüler automatisch eine Lizenz erhalten sollen (z.B. A1 for Students), b
 - Oder per Graph API: `GET /subscribedSkus`
 
 Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
+
+---
+
+## Hagen-ID: Lehrerausweise
+
+Das Plugin **Hagen-ID (Lehrkräfte)** nutzt dieselbe API und denselben API-Key wie der Schüler-Sync, arbeitet aber auf einer eigenen Teilmenge: Lehrkräfte liegen im Ausweis-System als Datensätze der Pseudo-Klasse `Lehrerkollegium`. Beide Plugins filtern darauf — das Schüler-Plugin schließt sie aus, das Lehrer-Plugin sieht nur sie. Deshalb deaktiviert keins der beiden die Datensätze des anderen.
+
+- **Quelle:** ausschließlich der **DB-Adapter**. Die Lehrer-CSV enthält keine SchILD-ID, und ohne stabile ID gibt es keinen kollisionsfreien Namespace. Lehrkräfte ohne ID werden übersprungen und im Log gemeldet.
+- **IDs:** `L-<k_lehrer.ID>`, z.B. `L-4711` — kollidiert nie mit einer Schüler-ID.
+- **Wer kommt rein:** `k_lehrer.Statistik = '+'`, optional zusätzlich gefiltert über das Adapter-Feld **Lehrer: PersonTyp-Filter** (leer = alle, sonst z.B. `LEHRKRAFT`).
+- **Fotos (optional):** Ordner mit `KUERZEL.jpg` / `.png`. Ein Foto wird **nur beim Erst-Sync** gesetzt — sobald im Zielsystem eines liegt, rührt das Plugin es nicht mehr an. So überschreibt der Sync keinen Selbst-Upload der Lehrkraft.
+- **Sicherheits-Riegel:** Bei 0 Lehrkräften aus SchILD werden gar keine Abmeldungen ausgeführt. Darüber hinaus bricht der Sync ab, wenn mehr als `max(3, 30%)` der Konten abgemeldet werden sollen — bei einem kleinen Kollegium greift eine reine Prozent-Schwelle zu spät. Die Vorschau warnt bereits vorher; einzelne Abmeldungen lassen sich dort abwählen.
 
 ---
 

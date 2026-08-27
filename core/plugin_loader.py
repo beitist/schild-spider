@@ -18,6 +18,7 @@ _ADAPTER_REGISTRY: dict[str, tuple[str, str]] = {
 
 _PLUGIN_REGISTRY: dict[str, tuple[str, str]] = {
     "hagen_id": ("plugins.hagen_id", "HagenIdPlugin"),
+    "hagen_id_lehrer": ("plugins.hagen_id_lehrer", "HagenIdLehrerPlugin"),
     "m365": ("plugins.m365", "M365Plugin"),
     "moodle": ("plugins.moodle", "MoodlePlugin"),
     "webuntis": ("plugins.webuntis", "WebUntisPlugin"),
@@ -90,7 +91,8 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 # Wird bei jeder strukturellen Änderung am Settings-Schema hochgezählt.
 # load_settings() prüft dies und migriert automatisch.
 # v10: adapter_configs (Configs ALLER Adapter bleiben beim Wechsel erhalten)
-SETTINGS_VERSION = 10
+# v11: hagen_id_lehrer Plugin + person_typ im schild_db Adapter
+SETTINGS_VERSION = 11
 
 
 def generate_default_settings(
@@ -194,6 +196,15 @@ def migrate_settings(old_settings: dict) -> dict:
             for field_key in new_plugin_cfg:
                 if field_key in old_plugin_cfg:
                     new_plugin_cfg[field_key] = old_plugin_cfg[field_key]
+
+    # Lehrer-Plugin nutzt dieselbe API wie der Schüler-Sync — Zugangsdaten
+    # beim ersten Auftauchen übernehmen, statt sie erneut abzutippen.
+    lehrer_cfg = new_settings["plugins"].get("hagen_id_lehrer")
+    hagen_cfg = new_settings["plugins"].get("hagen_id", {})
+    if lehrer_cfg is not None:
+        for field_key in ("api_url", "api_key"):
+            if not lehrer_cfg.get(field_key) and hagen_cfg.get(field_key):
+                lehrer_cfg[field_key] = hagen_cfg[field_key]
 
     # Failsafe-Werte übernehmen
     old_failsafe = old_settings.get("failsafe", {})

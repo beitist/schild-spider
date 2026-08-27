@@ -102,15 +102,21 @@ _SQL_LEISTUNGSDATEN = """
     WHERE ld.Abschnitt_ID IN ({placeholders})
 """
 
+# Statistik = '+' ist das Pflege-Feld, über das die Schule steuert wer in den
+# Sync kommt. PersonTyp (LEHRKRAFT / PERSONAL) wird optional ergänzt —
+# siehe Adapter-Config "person_typ".
 _SQL_TEACHERS = """
     SELECT
+        kl.ID                 AS teacher_id,
+        kl.Kuerzel            AS kuerzel,
         kl.Vorname            AS first_name,
         kl.Nachname           AS last_name,
         kl.Geburtsdatum       AS dob,
         kl.Amtsbezeichnung    AS job_title,
         kl.EMailDienstlich    AS email
     FROM k_lehrer kl
-    WHERE kl.Sichtbar = '+'
+    WHERE kl.Statistik = '+'
+    {person_typ_filter}
     ORDER BY kl.Nachname, kl.Vorname
 """
 
@@ -158,6 +164,7 @@ class SchildDbAdapter(AdapterBase):
         db_password: str,
         schuljahr: str,
         abschnitt: str,
+        person_typ: str = "",
     ) -> None:
         self.db_host = db_host
         self.db_port = db_port or "3306"
@@ -166,6 +173,7 @@ class SchildDbAdapter(AdapterBase):
         self.db_password = db_password
         self.schuljahr = schuljahr
         self.abschnitt = abschnitt or "1"
+        self.person_typ = (person_typ or "").strip()
 
     # --- Metadaten ---
 
@@ -213,6 +221,12 @@ class SchildDbAdapter(AdapterBase):
                 placeholder="1",
                 default="1",
             ),
+            ConfigField(
+                key="person_typ",
+                label="Lehrer: PersonTyp-Filter",
+                placeholder="leer = alle (z.B. LEHRKRAFT)",
+                required=False,
+            ),
         ]
 
     @classmethod
@@ -225,6 +239,7 @@ class SchildDbAdapter(AdapterBase):
             db_password=config.get("db_password", ""),
             schuljahr=config.get("schuljahr", ""),
             abschnitt=config.get("abschnitt", "1"),
+            person_typ=config.get("person_typ", ""),
         )
 
     # --- Verbindung ---
@@ -475,15 +490,28 @@ class SchildDbAdapter(AdapterBase):
     def load_teachers(self) -> list[TeacherRecord]:
         conn = self._connect()
         cursor = conn.cursor()
-        cursor.execute(_SQL_TEACHERS)
+
+        # PersonTyp ist optional — leer bedeutet "alle mit Statistik = '+'".
+        if self.person_typ:
+            sql = _SQL_TEACHERS.format(person_typ_filter="AND kl.PersonTyp = %s")
+            cursor.execute(sql, (self.person_typ,))
+        else:
+            cursor.execute(_SQL_TEACHERS.format(person_typ_filter=""))
+
         columns = [col[0] for col in cursor.description]
 
         teachers: list[TeacherRecord] = []
+        skipped_no_dob = 0
         for row in cursor.fetchall():
             raw = dict(zip(columns, row))
             last_name = (raw.get("last_name") or "").strip()
             dob = self._format_date(raw.get("dob"))
-            if not last_name or not dob:
+            if not last_name:
+                continue
+            if not dob:
+                # dob steckt im data_hash und im API-Payload — ohne Datum
+                # würde der Datensatz bei jedem Lauf als "geändert" gelten.
+                skipped_no_dob += 1
                 continue
             teachers.append(
                 TeacherRecord(
@@ -492,7 +520,15 @@ class SchildDbAdapter(AdapterBase):
                     dob=dob,
                     job_title=(raw.get("job_title") or "").strip(),
                     email=(raw.get("email") or "").strip(),
+                    teacher_id=str(raw.get("teacher_id") or "").strip(),
+                    kuerzel=(raw.get("kuerzel") or "").strip(),
                 )
+            )
+
+        if skipped_no_dob:
+            warnings.warn(
+                f"{skipped_no_dob} Lehrkräfte ohne Geburtsdatum übersprungen "
+                f"(k_lehrer.Geburtsdatum leer)."
             )
 
         conn.close()

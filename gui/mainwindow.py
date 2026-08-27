@@ -251,7 +251,7 @@ class MainWindow(QMainWindow):
             self._plugin_cards[key] = card
 
             # Falls bereits Quelldaten vorhanden
-            if self._students:
+            if self._students or self._teachers:
                 card.state = PluginCardState.DATA_LOADED
 
         # Erste Card automatisch auswählen
@@ -339,7 +339,7 @@ class MainWindow(QMainWindow):
         self._on_card_selected(plugin_key)
         if self._is_busy():
             return
-        if not self._students:
+        if not self._students and not self._teachers:
             self._log_msg("Keine Quelldaten geladen. Bitte zuerst 'Quelldaten laden'.")
             return
 

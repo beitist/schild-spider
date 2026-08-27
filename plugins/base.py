@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.models import ChangeSet, ConfigField
+from core.models import ChangeSet, ConfigField, StudentRecord, TeacherRecord
 
 
 class PluginBase(ABC):
@@ -61,6 +61,33 @@ class PluginBase(ABC):
         ...
 
     # --- Optionales Interface ---
+
+    def source_label(self) -> str:
+        """Bezeichnung der Datensätze für Log-Ausgaben."""
+        return "Schüler"
+
+    def build_source(
+        self, students: list[StudentRecord], teachers: list[TeacherRecord]
+    ) -> list[StudentRecord]:
+        """Bestimmt die SOLL-Datensätze für den Diff.
+
+        Standard: die Schüler. Lehrer-Plugins überschreiben das und bauen
+        aus den TeacherRecords passende Datensätze (eigener ID-Namespace).
+        """
+        return students
+
+    def needs_photo_update(self, student: dict, target: dict) -> bool:
+        """Entscheidet, ob das lokale Foto ins Zielsystem geschrieben werden muss.
+
+        Standard: das Plugin kann Foto-Hashes berechnen und der lokale Hash
+        weicht vom Zielsystem ab. Plugins ohne ``compute_photo_hash``
+        synchronisieren keine Fotos.
+        """
+        compute = getattr(self, "compute_photo_hash", None)
+        if compute is None:
+            return False
+        local_hash = compute(student["photo_path"])
+        return bool(local_hash) and local_hash != target.get("photo_hash", "")
 
     def pre_compute_files(self) -> list[dict]:
         """Dateien die vor dem Compute per Filepicker gewählt werden müssen.

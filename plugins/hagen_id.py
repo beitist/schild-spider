@@ -13,6 +13,11 @@ _BATCH_SIZE_NEW = 200
 _BATCH_SIZE_CHANGE = 200
 _BATCH_SIZE_SUSPEND = 500
 
+# Lehrkräfte liegen im Ausweis-System als Student-Datensätze in dieser
+# Pseudo-Klasse. Beide Plugins müssen danach filtern — das Schüler-Plugin
+# schließt sie aus, das Lehrer-Plugin arbeitet ausschließlich darauf.
+TEACHER_CLASS = "Lehrerkollegium"
+
 # (connect, read) — Read großzügig, weil Batches mit base64-Fotos groß werden
 _TIMEOUT_MANIFEST = (10, 60)
 _TIMEOUT_SYNC = (10, 180)
@@ -77,13 +82,25 @@ class HagenIdPlugin(PluginBase):
 
     # --- Sync-Interface ---
 
-    def get_manifest(self) -> list[dict]:
+    def _fetch_manifest(self) -> list[dict]:
+        """Holt das rohe Manifest — Schüler UND Lehrkräfte."""
         resp = self._session.get(
             f"{self.api_url}/api/sync/manifest", timeout=_TIMEOUT_MANIFEST
         )
         resp.raise_for_status()
         data = resp.json()
         return data.get("students", [])
+
+    def get_manifest(self) -> list[dict]:
+        """IST-Zustand der Schüler — ohne das Kollegium.
+
+        Ohne diesen Filter wären die Lehrkräfte "im Zielsystem, aber nicht
+        in den SchILD-Schülerdaten" und das Plugin würde bei jedem Lauf
+        das komplette Kollegium deaktivieren.
+        """
+        return [
+            s for s in self._fetch_manifest() if s.get("class_name") != TEACHER_CLASS
+        ]
 
     def compute_data_hash(self, student: dict) -> str:
         parts = "|".join(
@@ -99,7 +116,7 @@ class HagenIdPlugin(PluginBase):
 
     def apply_new(self, students: list[dict]) -> list[dict]:
         results = []
-        for batch in _batched(students, _BATCH_SIZE_NEW):
+        for batch in _batched(_dedupe_students(students), _BATCH_SIZE_NEW):
             payload = {"students": [self._prepare_student(s) for s in batch]}
             resp = self._session.post(
                 f"{self.api_url}/api/sync/new", json=payload, timeout=_TIMEOUT_SYNC
@@ -110,7 +127,7 @@ class HagenIdPlugin(PluginBase):
 
     def apply_changes(self, students: list[dict]) -> list[dict]:
         results = []
-        for batch in _batched(students, _BATCH_SIZE_CHANGE):
+        for batch in _batched(_dedupe_students(students), _BATCH_SIZE_CHANGE):
             payload = {"students": [self._prepare_student(s) for s in batch]}
             resp = self._session.post(
                 f"{self.api_url}/api/sync/change", json=payload, timeout=_TIMEOUT_SYNC
@@ -121,7 +138,7 @@ class HagenIdPlugin(PluginBase):
 
     def apply_suspend(self, school_internal_ids: list[str]) -> list[dict]:
         results = []
-        for batch in _batched(school_internal_ids, _BATCH_SIZE_SUSPEND):
+        for batch in _batched(_dedupe_ids(school_internal_ids), _BATCH_SIZE_SUSPEND):
             payload = {"school_internal_ids": batch}
             resp = self._session.post(
                 f"{self.api_url}/api/sync/suspend", json=payload, timeout=_TIMEOUT_SYNC
@@ -143,11 +160,15 @@ class HagenIdPlugin(PluginBase):
         }
 
         photo_path = student.get("photo_path")
-        if photo_path and Path(photo_path).exists():
+        if photo_path and self._include_photo(student) and Path(photo_path).exists():
             with open(photo_path, "rb") as f:
                 entry["photo_base64"] = base64.b64encode(f.read()).decode()
 
         return entry
+
+    def _include_photo(self, student: dict) -> bool:
+        """Darf das lokale Foto mitgeschickt werden? Beim Schüler-Sync immer."""
+        return True
 
     @staticmethod
     def compute_photo_hash(photo_path: str) -> str | None:
@@ -162,3 +183,21 @@ class HagenIdPlugin(PluginBase):
 def _batched(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _dedupe_students(students: list[dict]) -> list[dict]:
+    """Entfernt doppelte school_internal_ids (letzter Eintrag gewinnt).
+
+    Datensatz- und Foto-Änderungen laufen über denselben /change-Endpunkt;
+    ohne Dedup landet eine Person, bei der sich beides geändert hat,
+    zweimal im selben Request.
+    """
+    by_id: dict[str, dict] = {}
+    for student in students:
+        by_id[student["school_internal_id"]] = student
+    return list(by_id.values())
+
+
+def _dedupe_ids(school_internal_ids: list[str]) -> list[str]:
+    """Entfernt doppelte IDs, behält die Reihenfolge."""
+    return list(dict.fromkeys(school_internal_ids))

@@ -115,7 +115,15 @@ class PluginComputeWorker(QObject):
                 warnings.simplefilter("always")
 
                 self._emit(f"Berechne ChangeSet für {self.plugin_key}...")
-                cs = compute_changeset(self.students, self.plugin, self.max_suspend)
+
+                # Das Plugin bestimmt seine SOLL-Datensätze selbst —
+                # Standard sind die Schüler, Lehrer-Plugins bauen sich ihre
+                # Datensätze aus den TeacherRecords.
+                source = self.plugin.build_source(self.students, self.teachers)
+                if source is not self.students:
+                    self._emit(f"  Quelldatensätze: {len(source)}")
+
+                cs = compute_changeset(source, self.plugin, self.max_suspend)
                 self._emit(
                     f"  {self.plugin_key}: {len(cs.new)} neu, "
                     f"{len(cs.changed)} geändert, "
@@ -207,17 +215,18 @@ class PluginApplyWorker(QObject):
             phase = "init"
             total_ok = 0
             total_fail = 0
+            label = self.plugin.source_label()
 
             if cs.new:
-                phase = f"apply_new ({len(cs.new)} Schüler)"
-                self._emit(f"Lege {len(cs.new)} neue Schüler an...")
+                phase = f"apply_new ({len(cs.new)} {label})"
+                self._emit(f"Lege {len(cs.new)} neue {label} an...")
                 ok, fail = self._report_results(self.plugin.apply_new(cs.new))
                 total_ok += ok
                 total_fail += fail
 
             if cs.changed:
-                phase = f"apply_changes ({len(cs.changed)} Schüler)"
-                self._emit(f"Aktualisiere {len(cs.changed)} Schüler...")
+                phase = f"apply_changes ({len(cs.changed)} {label})"
+                self._emit(f"Aktualisiere {len(cs.changed)} {label}...")
                 ok, fail = self._report_results(self.plugin.apply_changes(cs.changed))
                 total_ok += ok
                 total_fail += fail
@@ -232,8 +241,8 @@ class PluginApplyWorker(QObject):
                 total_fail += fail
 
             if cs.suspended:
-                phase = f"apply_suspend ({len(cs.suspended)} Schüler)"
-                self._emit(f"Deaktiviere {len(cs.suspended)} Schüler...")
+                phase = f"apply_suspend ({len(cs.suspended)} {label})"
+                self._emit(f"Deaktiviere {len(cs.suspended)} {label}...")
                 ok, fail = self._report_results(self.plugin.apply_suspend(cs.suspended))
                 total_ok += ok
                 total_fail += fail
