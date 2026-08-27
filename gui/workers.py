@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 from core.engine import compute_changeset
 from core.models import ChangeSet
 from core.plugin_loader import load_adapter
-from plugins.base import PluginBase
+from plugins.base import PluginBase, failure_reason, is_success
 
 log = logging.getLogger(__name__)
 
@@ -68,8 +68,24 @@ class LoadWorker(QObject):
                 teachers = adapter.load_teachers()
                 if teachers:
                     self._emit(f"{len(teachers)} Lehrer geladen.")
+                    # Diagnostik: fehlende IDs/Emails fallen sonst erst im
+                    # Zielsystem auf — dort aber ohne erkennbare Ursache.
+                    with_id = sum(1 for t in teachers if t.teacher_id)
+                    with_email = sum(1 for t in teachers if t.email)
+                    self._emit(
+                        f"  davon {with_id} mit SchILD-ID, {with_email} mit Email"
+                    )
+                    if with_email < len(teachers):
+                        ohne = [
+                            t.kuerzel or t.last_name for t in teachers if not t.email
+                        ]
+                        self._emit(
+                            f"  ⚠ ohne Email (EMailDienstlich leer): "
+                            f"{', '.join(ohne[:15])}"
+                            + (" ..." if len(ohne) > 15 else "")
+                        )
                 else:
-                    self._emit("Keine Lehrerdaten (CSV nicht konfiguriert).")
+                    self._emit("Keine Lehrerdaten (Quelle nicht konfiguriert).")
 
                 for w in caught:
                     self._emit(f"⚠ {w.message}")
@@ -193,14 +209,13 @@ class PluginApplyWorker(QObject):
 
         Returns: (ok_count, fail_count)
         """
-        ok = sum(1 for r in results if r.get("success"))
-        failures = [r for r in results if not r.get("success")]
+        failures = [r for r in results if not is_success(r)]
+        ok = len(results) - len(failures)
         self._emit(f"  Ergebnis: {ok} OK, {len(failures)} Fehler")
 
         for r in failures[: self._MAX_FAILURE_LINES]:
             ident = r.get("school_internal_id") or r.get("group") or "?"
-            msg = r.get("message") or "Unbekannter Fehler"
-            self._emit(f"  ✗ {ident}: {msg}")
+            self._emit(f"  ✗ {ident}: {failure_reason(r)}")
         if len(failures) > self._MAX_FAILURE_LINES:
             self._emit(
                 f"  ... und {len(failures) - self._MAX_FAILURE_LINES} weitere Fehler"

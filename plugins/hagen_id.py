@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 from pathlib import Path
 
 import requests
 
 from core.models import ConfigField
-from plugins.base import PluginBase
+from plugins.base import PluginBase, is_success
+
+log = logging.getLogger(__name__)
+
+# Obergrenze für Rohantworten im Log — genug zum Diagnostizieren,
+# wenig genug, dass ein Massenfehler spider.log nicht sprengt.
+_LOG_BODY_MAX = 2000
 
 _BATCH_SIZE_NEW = 200
 _BATCH_SIZE_CHANGE = 200
@@ -118,36 +125,68 @@ class HagenIdPlugin(PluginBase):
         results = []
         for batch in _batched(_dedupe_students(students), _BATCH_SIZE_NEW):
             payload = {"students": [self._prepare_student(s) for s in batch]}
-            resp = self._session.post(
-                f"{self.api_url}/api/sync/new", json=payload, timeout=_TIMEOUT_SYNC
-            )
-            resp.raise_for_status()
-            results.extend(resp.json().get("results", []))
+            results.extend(self._post_sync("new", payload))
         return results
 
     def apply_changes(self, students: list[dict]) -> list[dict]:
         results = []
         for batch in _batched(_dedupe_students(students), _BATCH_SIZE_CHANGE):
             payload = {"students": [self._prepare_student(s) for s in batch]}
-            resp = self._session.post(
-                f"{self.api_url}/api/sync/change", json=payload, timeout=_TIMEOUT_SYNC
-            )
-            resp.raise_for_status()
-            results.extend(resp.json().get("results", []))
+            results.extend(self._post_sync("change", payload))
         return results
 
     def apply_suspend(self, school_internal_ids: list[str]) -> list[dict]:
         results = []
         for batch in _batched(_dedupe_ids(school_internal_ids), _BATCH_SIZE_SUSPEND):
             payload = {"school_internal_ids": batch}
-            resp = self._session.post(
-                f"{self.api_url}/api/sync/suspend", json=payload, timeout=_TIMEOUT_SYNC
-            )
-            resp.raise_for_status()
-            results.extend(resp.json().get("results", []))
+            results.extend(self._post_sync("suspend", payload))
         return results
 
     # --- Helpers ---
+
+    def _post_sync(self, endpoint: str, payload: dict) -> list[dict]:
+        """Schickt einen Batch und protokolliert die Antwort des Servers.
+
+        Ohne dieses Logging bleibt bei einer unerwarteten Antwortstruktur
+        nur ein nacktes "Unbekannter Fehler" im GUI übrig — die eigentliche
+        Auskunft des Servers landet dann nirgendwo.
+        """
+        url = f"{self.api_url}/api/sync/{endpoint}"
+        log.info("POST %s → %s", url, _payload_summary(payload))
+
+        resp = self._session.post(url, json=payload, timeout=_TIMEOUT_SYNC)
+
+        if resp.status_code >= 400:
+            # Bei Validierungsfehlern steht die Ursache im Body —
+            # raise_for_status() würde ihn wegwerfen.
+            log.error(
+                "POST %s → HTTP %s: %s",
+                url,
+                resp.status_code,
+                resp.text[:_LOG_BODY_MAX],
+            )
+        resp.raise_for_status()
+
+        data = resp.json()
+        results = data.get("results", [])
+
+        if not results:
+            log.warning(
+                "POST %s: Antwort ohne 'results': %s", url, str(data)[:_LOG_BODY_MAX]
+            )
+        else:
+            unklar = [r for r in results if not is_success(r)]
+            if unklar:
+                log.warning(
+                    "POST %s: %d von %d Ergebnissen nicht als Erfolg erkannt. "
+                    "Rohantwort (erste 3): %s",
+                    url,
+                    len(unklar),
+                    len(results),
+                    str(unklar[:3])[:_LOG_BODY_MAX],
+                )
+
+        return results
 
     def _prepare_student(self, student: dict) -> dict:
         entry = {
@@ -183,6 +222,29 @@ class HagenIdPlugin(PluginBase):
 def _batched(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _payload_summary(payload: dict) -> str:
+    """Beschreibt einen Request fürs Log: Größe plus erster Datensatz.
+
+    Belegt schwarz auf weiß, welche Felder tatsächlich rausgehen — sonst
+    steht bei "Feld kommt im Zielsystem nicht an" Aussage gegen Aussage.
+    Fotos werden auf ihre Länge reduziert, sonst ist das Log unlesbar.
+    """
+    if "school_internal_ids" in payload:
+        ids = payload["school_internal_ids"]
+        return f"{len(ids)} IDs, erste: {ids[:5]}"
+
+    students = payload.get("students", [])
+    if not students:
+        return "leerer Payload"
+
+    first = dict(students[0])
+    photo = first.pop("photo_base64", None)
+    if photo is not None:
+        first["photo_base64"] = f"<{len(photo)} Zeichen>"
+
+    return f"{len(students)} Datensätze, erster: {first}"
 
 
 def _dedupe_students(students: list[dict]) -> list[dict]:

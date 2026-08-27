@@ -4,6 +4,51 @@ from abc import ABC, abstractmethod
 
 from core.models import ChangeSet, ConfigField, StudentRecord, TeacherRecord
 
+# Status-Werte, die ein Zielsystem statt eines booleschen "success" liefern kann.
+_SUCCESS_STATES = {
+    "ok",
+    "success",
+    "created",
+    "updated",
+    "changed",
+    "suspended",
+    "unchanged",
+    "skipped",
+}
+
+_ERROR_KEYS = ("error", "errors", "detail", "message")
+
+
+def is_success(result: dict) -> bool:
+    """Wertet ein Ergebnis-Objekt eines Zielsystems aus.
+
+    Maßgeblich ist ``success``, wenn das Feld existiert. Sonst wird ein
+    Status-Feld herangezogen — nicht jede API antwortet mit einem Boolean.
+    Fehlt beides, gilt der Datensatz nur dann als erfolgreich, wenn auch
+    kein Fehlerfeld gefüllt ist.
+    """
+    if "success" in result:
+        return bool(result["success"])
+
+    for key in ("status", "result", "action"):
+        if key in result:
+            return str(result[key]).lower() in _SUCCESS_STATES
+
+    return not any(result.get(key) for key in _ERROR_KEYS)
+
+
+def failure_reason(result: dict) -> str:
+    """Liest die Fehlerursache aus — notfalls als Rohantwort.
+
+    Ein nacktes "Unbekannter Fehler" hilft bei der Diagnose nicht weiter;
+    lieber die tatsächliche Antwort des Servers zeigen.
+    """
+    for key in _ERROR_KEYS:
+        value = result.get(key)
+        if value:
+            return str(value)
+    return f"keine Fehlermeldung, Rohantwort: {result}"
+
 
 class PluginBase(ABC):
     """Abstrakte Basisklasse für Output-Plugins."""
