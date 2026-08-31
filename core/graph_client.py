@@ -87,8 +87,15 @@ class GraphClient:
         path: str,
         json: dict | list | None = None,
         params: dict | None = None,
+        *,
+        not_found_ok: bool = False,
     ) -> dict:
-        """Sendet einen Request an die Graph API mit Auth + Retry."""
+        """Sendet einen Request an die Graph API mit Auth + Retry.
+
+        not_found_ok: 404 ist eine erwartete Antwort (Existenz-Prüfung,
+        Replikations-Polling) — wird dann nur als DEBUG geloggt statt als
+        ERROR, die GraphApiError fliegt trotzdem (Aufrufer fängt sie).
+        """
         url = f"{_GRAPH_BASE}{path}" if path.startswith("/") else path
         log.debug("%s %s params=%s", method, url, params)
 
@@ -127,14 +134,24 @@ class GraphClient:
                 error = body.get("error", {})
                 msg = error.get("message", "") or resp.text
                 code = error.get("code", "")
-                log.error(
-                    "Graph API Fehler: %s %s → %s [%s] %s",
-                    method,
-                    url,
-                    resp.status_code,
-                    code,
-                    msg,
-                )
+                if resp.status_code == 404 and not_found_ok:
+                    # Erwarteter 404 (z.B. Existenz-Prüfung vor dem Anlegen)
+                    # → kein Fehler, nur Diagnose-Info für spider.log.
+                    log.debug(
+                        "Nicht vorhanden (erwartet): %s %s → 404 [%s]",
+                        method,
+                        url,
+                        code,
+                    )
+                else:
+                    log.error(
+                        "Graph API Fehler: %s %s → %s [%s] %s",
+                        method,
+                        url,
+                        resp.status_code,
+                        code,
+                        msg,
+                    )
                 raise GraphApiError(resp.status_code, msg, code)
 
             if not resp.content:
@@ -201,10 +218,17 @@ class GraphClient:
         return results[0] if results else None
 
     def find_user_by_upn(self, upn: str) -> dict | None:
-        """Sucht einen User anhand seines UPN (E-Mail)."""
+        """Sucht einen User anhand seines UPN (E-Mail).
+
+        404 ist hier KEIN Fehler — es heißt nur "User existiert (noch) nicht"
+        (z.B. bei der Existenz-Prüfung vor dem Anlegen neuer Schüler).
+        """
         try:
             return self._request(
-                "GET", f"/users/{upn}", params={"$select": self._USER_SELECT}
+                "GET",
+                f"/users/{upn}",
+                params={"$select": self._USER_SELECT},
+                not_found_ok=True,
             )
         except GraphApiError as e:
             if e.status_code == 404:
@@ -272,6 +296,7 @@ class GraphClient:
                 "GET",
                 f"/groups/{group_id}",
                 params={"$select": "id,displayName"},
+                not_found_ok=True,
             )
         except GraphApiError as e:
             if e.status_code == 404:

@@ -821,8 +821,21 @@ class MainWindow(QMainWindow):
     # --- Write-back ---
 
     def _on_write_back_ready(self, plugin_key: str, data: list) -> None:
-        """Empfängt Write-back-Daten vom Apply-Worker und speichert sie."""
-        self._pending_write_back.extend(data)
+        """Empfängt Write-back-Daten vom Apply-Worker und speichert sie.
+
+        Dedupliziert nach (ID, Email) — mehrfaches Anwenden ohne
+        zwischenzeitliches Rückschreiben erzeugt sonst doppelte Einträge.
+        """
+        seen = {
+            (d.get("school_internal_id"), d.get("email"))
+            for d in self._pending_write_back
+        }
+        for item in data:
+            key = (item.get("school_internal_id"), item.get("email"))
+            if key not in seen:
+                self._pending_write_back.append(item)
+                seen.add(key)
+
         count = len(self._pending_write_back)
         self._btn_write_back.setText(f"R\u00fcckschreiben ({count})")
         self._btn_write_back.show()

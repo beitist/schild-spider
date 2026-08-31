@@ -252,9 +252,28 @@ class M365Plugin(PluginBase):
                     student["_email_generated"] = True
                     preview_emails.add(email.lower())
 
+    def _link_existing_user(self, user: dict, sid: str, student: dict) -> dict:
+        """Verknüpft einen bestehenden M365-Account mit einer SchILD-ID."""
+        self._graph.update_user(
+            user["id"],
+            {
+                "employeeId": sid,
+                "department": student.get("class_name", ""),
+                "displayName": self._format_display_name(student),
+            },
+        )
+        return {
+            "school_internal_id": sid,
+            "success": True,
+            "message": f"Verknüpft: {user.get('userPrincipalName', '')}",
+        }
+
     def apply_new(self, students: list[dict]) -> list[dict]:
         self._generated_emails = []
         existing_emails = set(self._existing_emails) or self._collect_existing_emails()
+        # IST-Bestand VOR diesem Lauf: erlaubt den Existenz-Check lokal
+        # statt per API-Probe pro Schüler (halbiert Requests und Laufzeit).
+        manifest_emails = frozenset(existing_emails)
         results: list[dict] = []
 
         for student in students:
@@ -297,26 +316,16 @@ class M365Plugin(PluginBase):
 
                 existing_emails.add(email.lower())
 
-                # Prüfen ob User per Email schon existiert (ohne employeeId)
-                existing_user = self._graph.find_user_by_upn(email)
-                if existing_user:
-                    user_id = existing_user["id"]
-                    self._graph.update_user(
-                        user_id,
-                        {
-                            "employeeId": sid,
-                            "department": student.get("class_name", ""),
-                            "displayName": self._format_display_name(student),
-                        },
-                    )
-                    results.append(
-                        {
-                            "school_internal_id": sid,
-                            "success": True,
-                            "message": f"Verknüpft: {email}",
-                        }
-                    )
-                    continue
+                # Existiert der User schon (ohne employeeId)? Lokaler Check
+                # gegen den Manifest-Bestand statt API-Probe pro Schüler —
+                # get_manifest hat alle User der Domain bereits geladen.
+                if email.lower() in manifest_emails:
+                    existing_user = self._graph.find_user_by_upn(email)
+                    if existing_user:
+                        results.append(
+                            self._link_existing_user(existing_user, sid, student)
+                        )
+                        continue
 
                 user_data = {
                     "accountEnabled": True,
@@ -334,7 +343,19 @@ class M365Plugin(PluginBase):
                     },
                 }
 
-                created = self._graph.create_user(user_data)
+                try:
+                    created = self._graph.create_user(user_data)
+                except GraphApiError as exc:
+                    # Race: Account entstand nach dem Manifest-Load
+                    # (z.B. zwischen Berechnen und Anwenden) → verknüpfen.
+                    if "already exists" in str(exc).lower():
+                        existing_user = self._graph.find_user_by_upn(email)
+                        if existing_user:
+                            results.append(
+                                self._link_existing_user(existing_user, sid, student)
+                            )
+                            continue
+                    raise
                 user_id = created["id"]
 
                 if self._license_sku_id:
@@ -400,12 +421,27 @@ class M365Plugin(PluginBase):
                     updates["department"] = student["class_name"]
 
                 email = (student.get("email") or "").strip()
-                if (
-                    email
-                    and email.lower() != (user.get("userPrincipalName") or "").lower()
-                ):
+                upn = (user.get("userPrincipalName") or "").strip()
+                if email and email.lower() != upn.lower():
                     updates["userPrincipalName"] = email
                     updates["mailNickname"] = email.split("@")[0]
+
+                # SchILD hat keine Email, der M365-Account schon (z.B.
+                # Rückschreiben nach dem Anlegen versäumt) → UPN für den
+                # Write-back vormerken. Heilt SchILD und beendet die
+                # Dauerschleife "geändert" durch den Email-Hash-Unterschied.
+                message = ""
+                if not email and upn:
+                    self._generated_emails.append(
+                        {
+                            "school_internal_id": sid,
+                            "email": upn,
+                            "first_name": student.get("first_name", ""),
+                            "last_name": student.get("last_name", ""),
+                            "class_name": student.get("class_name", ""),
+                        }
+                    )
+                    message = f"Email fehlt in SchILD → Rückschreiben: {upn}"
 
                 if updates:
                     updates["displayName"] = self._format_display_name(student)
@@ -416,7 +452,7 @@ class M365Plugin(PluginBase):
                 # gesteuert (Vorschau mit Checkboxen), nicht als Nebeneffekt.
 
                 results.append(
-                    {"school_internal_id": sid, "success": True, "message": ""}
+                    {"school_internal_id": sid, "success": True, "message": message}
                 )
 
             except GraphApiError as exc:
