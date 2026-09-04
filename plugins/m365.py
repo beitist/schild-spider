@@ -10,12 +10,16 @@ import string
 import time
 import warnings
 
-from core.email_generator import generate_email
+from core.email_generator import analyze_email, generate_email
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
 from plugins.base import PluginBase
 
 log = logging.getLogger(__name__)
+
+# Verhalten bei geänderter Email (z.B. nach Klassenwechsel)
+EMAIL_CHANGE_UPN = "upn"  # Adresse am bestehenden Konto ändern
+EMAIL_CHANGE_NEW_ACCOUNT = "new_account"  # neues Konto, altes deaktivieren
 
 
 class M365Plugin(PluginBase):
@@ -34,6 +38,7 @@ class M365Plugin(PluginBase):
         usage_location: str,
         display_name_template: str = "",
         default_password: str = "",
+        email_change_mode: str = EMAIL_CHANGE_UPN,
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
@@ -43,6 +48,11 @@ class M365Plugin(PluginBase):
         self._usage_location = usage_location or "DE"
         self._display_name_template = display_name_template or "{k} {n}, {v}"
         self._default_password = default_password or ""
+        self._email_change_mode = (
+            email_change_mode
+            if email_change_mode in (EMAIL_CHANGE_UPN, EMAIL_CHANGE_NEW_ACCOUNT)
+            else EMAIL_CHANGE_UPN
+        )
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
@@ -129,6 +139,22 @@ class M365Plugin(PluginBase):
                 placeholder="{k} {n}, {v}",
                 default="{k} {n}, {v}",
             ),
+            ConfigField(
+                key="email_change_mode",
+                label="Bei Email-Änderung (z.B. Klassenwechsel)",
+                field_type="choice",
+                default=EMAIL_CHANGE_UPN,
+                choices=[
+                    (
+                        EMAIL_CHANGE_UPN,
+                        "Adresse ändern — Konto, Postfach und Daten bleiben",
+                    ),
+                    (
+                        EMAIL_CHANGE_NEW_ACCOUNT,
+                        "Neues Konto anlegen, altes Konto deaktivieren",
+                    ),
+                ],
+            ),
         ]
 
     @classmethod
@@ -145,6 +171,7 @@ class M365Plugin(PluginBase):
             usage_location=config.get("usage_location", "DE"),
             display_name_template=config.get("display_name_template", "{k} {n}, {v}"),
             default_password=config.get("default_password", "Schule2223!"),
+            email_change_mode=config.get("email_change_mode", EMAIL_CHANGE_UPN),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -268,6 +295,38 @@ class M365Plugin(PluginBase):
             "message": f"Verknüpft: {user.get('userPrincipalName', '')}",
         }
 
+    def _create_account(self, student: dict, email: str) -> dict:
+        """Legt ein Schüler-Konto an (inkl. Lizenz, falls konfiguriert).
+
+        Wirft GraphApiError, wenn das Anlegen scheitert. Lizenz-Fehler
+        werden nur als Warnung gemeldet (Konto existiert dann trotzdem).
+        """
+        sid = student["school_internal_id"]
+        user_data = {
+            "accountEnabled": True,
+            "displayName": self._format_display_name(student),
+            "givenName": student.get("first_name", ""),
+            "surname": student.get("last_name", ""),
+            "userPrincipalName": email,
+            "mailNickname": email.split("@")[0],
+            "employeeId": sid,
+            "department": student.get("class_name", ""),
+            "usageLocation": self._usage_location,
+            "passwordProfile": {
+                "password": self._default_password or _generate_password(),
+                "forceChangePasswordNextSignIn": True,
+            },
+        }
+        created = self._graph.create_user(user_data)
+
+        if self._license_sku_id:
+            try:
+                self._graph.assign_license(created["id"], self._license_sku_id)
+            except GraphApiError as exc:
+                warnings.warn(f"Lizenz für {sid}: {exc}")
+
+        return created
+
     def apply_new(self, students: list[dict]) -> list[dict]:
         self._generated_emails = []
         existing_emails = set(self._existing_emails) or self._collect_existing_emails()
@@ -327,24 +386,8 @@ class M365Plugin(PluginBase):
                         )
                         continue
 
-                user_data = {
-                    "accountEnabled": True,
-                    "displayName": self._format_display_name(student),
-                    "givenName": student.get("first_name", ""),
-                    "surname": student.get("last_name", ""),
-                    "userPrincipalName": email,
-                    "mailNickname": email.split("@")[0],
-                    "employeeId": sid,
-                    "department": student.get("class_name", ""),
-                    "usageLocation": self._usage_location,
-                    "passwordProfile": {
-                        "password": self._default_password or _generate_password(),
-                        "forceChangePasswordNextSignIn": True,
-                    },
-                }
-
                 try:
-                    created = self._graph.create_user(user_data)
+                    self._create_account(student, email)
                 except GraphApiError as exc:
                     # Race: Account entstand nach dem Manifest-Load
                     # (z.B. zwischen Berechnen und Anwenden) → verknüpfen.
@@ -356,13 +399,6 @@ class M365Plugin(PluginBase):
                             )
                             continue
                     raise
-                user_id = created["id"]
-
-                if self._license_sku_id:
-                    try:
-                        self._graph.assign_license(user_id, self._license_sku_id)
-                    except GraphApiError as exc:
-                        warnings.warn(f"Lizenz für {sid}: {exc}")
 
                 results.append(
                     {"school_internal_id": sid, "success": True, "message": email}
@@ -422,15 +458,29 @@ class M365Plugin(PluginBase):
 
                 email = (student.get("email") or "").strip()
                 upn = (user.get("userPrincipalName") or "").strip()
-                if email and email.lower() != upn.lower():
+                message = ""
+                email_changed = bool(email) and email.lower() != upn.lower()
+
+                if (
+                    email_changed
+                    and self._email_change_mode == EMAIL_CHANGE_NEW_ACCOUNT
+                ):
+                    # Modus "Neues Konto": neues Konto mit der neuen Adresse,
+                    # altes Konto deaktivieren. Alle anderen Felder sind im
+                    # neuen Konto bereits korrekt → keine weiteren Updates.
+                    results.append(self._replace_account(user, sid, student, email))
+                    continue
+
+                if email_changed:
+                    # Modus "Adresse ändern": UPN umbenennen, Konto bleibt.
                     updates["userPrincipalName"] = email
                     updates["mailNickname"] = email.split("@")[0]
+                    message = f"Adresse geändert: {upn} → {email}"
 
                 # SchILD hat keine Email, der M365-Account schon (z.B.
                 # Rückschreiben nach dem Anlegen versäumt) → UPN für den
                 # Write-back vormerken. Heilt SchILD und beendet die
                 # Dauerschleife "geändert" durch den Email-Hash-Unterschied.
-                message = ""
                 if not email and upn:
                     self._generated_emails.append(
                         {
@@ -446,6 +496,20 @@ class M365Plugin(PluginBase):
                 if updates:
                     updates["displayName"] = self._format_display_name(student)
                     self._graph.update_user(user_id, updates)
+
+                if email_changed:
+                    # Primäre SMTP-Adresse (Exchange) folgt dem UPN nicht
+                    # automatisch. Versuch über "mail" — bei Exchange-
+                    # verwalteten Postfächern kann Graph das ablehnen, dann
+                    # muss der Admin in Exchange nachziehen.
+                    try:
+                        self._graph.update_user(user_id, {"mail": email})
+                    except GraphApiError as exc:
+                        warnings.warn(
+                            f"{sid}: UPN geändert, aber primäre Mailadresse "
+                            f"konnte nicht gesetzt werden ({exc.error_code or exc}) "
+                            f"— bitte in Exchange prüfen: {upn} → {email}"
+                        )
 
                 # Gruppenwechsel bei Klassenwechsel
                 # Klassenwechsel wird über compute_group_diff / apply_group_changes
@@ -465,6 +529,46 @@ class M365Plugin(PluginBase):
                 )
 
         return results
+
+    def _replace_account(
+        self, old_user: dict, sid: str, student: dict, new_email: str
+    ) -> dict:
+        """Modus "Neues Konto": neues Konto anlegen, altes deaktivieren.
+
+        Reihenfolge bewusst: erst anlegen — scheitert das, bleibt das alte
+        Konto unangetastet. Danach altes Konto deaktivieren und dessen
+        employeeId entfernen, damit nur noch das neue Konto als "dieser
+        Schüler" gilt (Manifest, Gruppen-Lookups).
+        """
+        old_upn = (old_user.get("userPrincipalName") or "").strip()
+        self._create_account(student, new_email)
+
+        try:
+            self._graph.update_user(
+                old_user["id"],
+                {
+                    "accountEnabled": False,
+                    "employeeId": None,
+                    "displayName": f"{old_user.get('displayName') or old_upn} (alt)",
+                },
+            )
+        except GraphApiError as exc:
+            # Neues Konto existiert — das alte bleibt aktiv, muss manuell
+            # deaktiviert werden. Als Fehler melden, damit es auffällt.
+            return {
+                "school_internal_id": sid,
+                "success": False,
+                "message": (
+                    f"Neues Konto {new_email} angelegt, aber altes Konto "
+                    f"{old_upn} konnte nicht deaktiviert werden: {exc}"
+                ),
+            }
+
+        return {
+            "school_internal_id": sid,
+            "success": True,
+            "message": f"Neues Konto: {new_email} (alt deaktiviert: {old_upn})",
+        }
 
     def apply_suspend(self, school_internal_ids: list[str]) -> list[dict]:
         results: list[dict] = []
@@ -501,6 +605,62 @@ class M365Plugin(PluginBase):
 
     def get_write_back_data(self) -> list[dict]:
         return list(self._generated_emails)
+
+    def check_source_emails(self, students: list[dict]) -> list[dict]:
+        """Erkennt SchILD-Emails, die nicht mehr zum Template passen.
+
+        Typischer Fall: Klassenwechsel bei Template ``{k}.{n}`` — die
+        Adresse trägt noch die alte Klasse. Die neue Adresse wird gegen
+        alle anderen SchILD-Emails auf Kollision geprüft (M365-Kollisionen
+        fallen erst beim Anwenden im M365-Plugin auf).
+        """
+        if not self._domain:
+            return []
+
+        all_emails = {(s.get("email") or "").strip().lower() for s in students} - {""}
+
+        suggestions: list[dict] = []
+        for s in students:
+            sid = s.get("school_internal_id", "")
+            current = (s.get("email") or "").strip()
+            first = s.get("first_name", "")
+            last = s.get("last_name", "")
+            klass = s.get("class_name", "")
+            if not sid or not klass:
+                continue
+
+            finding = analyze_email(
+                current, first, last, klass, self._domain, self._email_template
+            )
+            if finding is None:
+                continue
+
+            new_email = generate_email(
+                first,
+                last,
+                self._domain,
+                self._email_template,
+                all_emails - {current.lower()},
+                class_name=klass,
+            )
+            reason = finding["reason"] if new_email else "collision"
+            suggestions.append(
+                {
+                    "school_internal_id": sid,
+                    "first_name": first,
+                    "last_name": last,
+                    "class_name": klass,
+                    "old_email": current,
+                    "email": new_email or "",
+                    "reason": reason,
+                    "old_class": finding.get("old_class", ""),
+                    # Klassenwechsel sind eindeutig → vorausgewählt;
+                    # sonstige Abweichungen (Namensänderung, manuelle
+                    # Adresse) entscheidet der User bewusst.
+                    "checked": reason == "class_change",
+                }
+            )
+        return suggestions
 
     # --- Gruppen-Hilfsmethoden ---
 

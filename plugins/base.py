@@ -164,6 +164,20 @@ class PluginBase(ABC):
         """
         return []
 
+    def check_source_emails(self, students: list[dict]) -> list[dict]:
+        """Prüft, ob die Quell-Emails (SchILD) noch zum Schema des Plugins passen.
+
+        Wird direkt nach dem Laden der Quelldaten aufgerufen — reine
+        Berechnung, keine API-Zugriffe. Plugins, die Emails nach einem
+        Template erzeugen (z.B. M365 mit ``{k}.{n}``), erkennen so
+        Klassenwechsel, bei denen die Adresse in SchILD nachgezogen werden muss.
+
+        Returns: [{school_internal_id, first_name, last_name, class_name,
+                   old_email, email (neu), reason, old_class, checked}]
+        Standard: keine Vorschläge.
+        """
+        return []
+
     def get_write_back_data(self) -> list[dict]:
         """Gibt Daten zurück die an den Adapter zurückgeschrieben werden sollen.
 

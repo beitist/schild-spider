@@ -243,7 +243,7 @@ class _ConfigPage(QWidget):
         self._config = config
         self._show_enabled = show_enabled
         self._show_test = show_test
-        self._field_widgets: dict[str, QLineEdit] = {}
+        self._field_widgets: dict[str, QWidget] = {}  # QLineEdit oder QComboBox
         self._chk_enabled: QCheckBox | None = None
 
         self._build_ui()
@@ -265,6 +265,17 @@ class _ConfigPage(QWidget):
         schema: list[ConfigField] = self._config_class.config_schema()
 
         for field in schema:
+            if field.field_type == "choice":
+                combo = QComboBox()
+                combo.setMinimumHeight(32)
+                for value, label in field.choices:
+                    combo.addItem(label, value)
+                idx = combo.findData(self._config.get(field.key, field.default))
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+                form.addRow(f"{field.label}:", combo)
+                self._field_widgets[field.key] = combo
+                continue
+
             txt = QLineEdit(self._config.get(field.key, field.default))
             txt.setPlaceholderText(field.placeholder)
             txt.setMinimumHeight(32)
@@ -343,5 +354,8 @@ class _ConfigPage(QWidget):
         if self._chk_enabled is not None:
             config["enabled"] = self._chk_enabled.isChecked()
         for key, widget in self._field_widgets.items():
-            config[key] = widget.text().strip()
+            if isinstance(widget, QComboBox):
+                config[key] = widget.currentData() or ""
+            else:
+                config[key] = widget.text().strip()
         return config

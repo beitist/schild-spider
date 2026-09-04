@@ -92,7 +92,8 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 # load_settings() prüft dies und migriert automatisch.
 # v10: adapter_configs (Configs ALLER Adapter bleiben beim Wechsel erhalten)
 # v11: hagen_id_lehrer Plugin + person_typ im schild_db Adapter
-SETTINGS_VERSION = 11
+# v12: m365.email_change_mode (Verhalten bei Email-Änderung)
+SETTINGS_VERSION = 12
 
 
 def generate_default_settings(

@@ -94,7 +94,9 @@ class ConfigField:
 
     key: str  # Schlüssel in settings.json (z.B. "api_url")
     label: str  # Anzeigename (z.B. "API URL")
-    field_type: str = "text"  # "text", "password", "url", "path", "dir"
+    field_type: str = "text"  # "text", "password", "url", "path", "dir", "choice"
     required: bool = True
     placeholder: str = ""
     default: str = ""
+    # Nur für field_type="choice": [(wert, anzeige), ...] — gespeichert wird der Wert
+    choices: list[tuple[str, str]] = field(default_factory=list)

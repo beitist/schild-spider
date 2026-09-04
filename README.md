@@ -30,6 +30,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 - **Email-Vorschau** — Generierte Email-Adressen werden vor dem Anwenden in der Vorschau angezeigt
 - **Klassengruppen** — Automatische Erstellung von SuS- und KuK-Gruppen pro Klasse (M365), Kurs-Sync (Moodle)
 - **Write-Back** — Generierte Email-Adressen können in die SchILD-DB zurückgeschrieben werden
+- **Email-Korrektur nach Klassenwechsel** — Beim Laden werden SchILD-Emails gegen das Template geprüft (z.B. `{k}.{n}`); veraltete Adressen können per Dialog in SchILD aktualisiert werden, der M365-Sync zieht den UPN danach nach
 - **Email-Fallback-Matching** — Bestehende M365-Accounts werden per Email erkannt, auch ohne employeeId
 - **Crash-Diagnostik** — Worker-Logging in `spider.log`, nativer Crash-Traceback via `faulthandler`
 
@@ -172,6 +173,17 @@ Falls Schüler automatisch eine Lizenz erhalten sollen (z.B. A1 for Students), b
 - Oder per Graph API: `GET /subscribedSkus`
 
 Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
+
+### 6. Verhalten bei Email-Änderung (z.B. Klassenwechsel)
+
+Ändert sich die SchILD-Email eines Schülers (etwa weil die Klasse Teil der Adresse ist), bietet **Einstellungen → Microsoft 365 → „Bei Email-Änderung"** zwei Wege:
+
+| Option | Verhalten |
+|---|---|
+| **Adresse ändern** (Standard) | UPN und mailNickname werden am bestehenden Konto umbenannt — Postfach, OneDrive und Gruppen bleiben. Zusätzlich wird versucht, die primäre Mailadresse (`mail`) nachzuziehen; lehnt Exchange das ab, erscheint eine Warnung mit alt → neu zum manuellen Nachziehen. |
+| **Neues Konto anlegen, altes deaktivieren** | Neues Konto mit der neuen Adresse (inkl. Lizenz), danach wird das alte Konto deaktiviert, seine employeeId entfernt und der Anzeigename mit „(alt)" markiert. |
+
+Die Email-Änderung selbst wird in SchILD vorbereitet: Beim Laden der Quelldaten erkennt Schild Spider Adressen, die nicht mehr zum Template passen, und bietet sie über **„Email-Adressen aktualisieren"** zum Rückschreiben an. Danach **Berechnen → Anwenden** im M365-Plugin.
 
 ---
 

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.models import ChangeSet, StudentRecord, TeacherRecord
 from core.plugin_loader import get_plugin_class, load_adapter, load_settings
+from gui.email_update_dialog import EmailUpdateDialog
 from gui.plugin_card import PluginCard, PluginCardState
 from gui.settings_dialog import SettingsDialog
 from gui.workers import LoadWorker, PluginApplyWorker, PluginComputeWorker
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self._worker: object | None = None
         self._worker_thread: QThread | None = None
         self._pending_write_back: list[dict] = []
+        self._email_suggestions: list[dict] = []  # aus LoadWorker.email_check_ready
         self._apply_stats: dict[str, tuple[int, int]] = {}  # key → (ok, fehler)
         self._apply_had_error = False
 
@@ -118,6 +120,12 @@ class MainWindow(QMainWindow):
         self._lbl_counts = QLabel("")
         self._lbl_counts.setStyleSheet("color: #666; font-size: 12px;")
         load_row.addWidget(self._lbl_counts)
+        # Email-Korrekturen in SchILD (hidden bis Vorschläge vorliegen)
+        self._btn_email_update = QPushButton("Email-Adressen aktualisieren")
+        self._btn_email_update.setStyleSheet("padding: 6px 14px; font-size: 13px;")
+        self._btn_email_update.clicked.connect(self._on_email_update)
+        self._btn_email_update.hide()
+        load_row.addWidget(self._btn_email_update)
         load_row.addStretch()
         left_layout.addLayout(load_row)
 
@@ -280,6 +288,8 @@ class MainWindow(QMainWindow):
         self._teachers.clear()
         self._pending_write_back.clear()
         self._btn_write_back.hide()
+        self._email_suggestions = []
+        self._btn_email_update.hide()
         self._lbl_counts.setText("")
 
         # Cards zurücksetzen
@@ -303,6 +313,7 @@ class MainWindow(QMainWindow):
         worker.log_signal.connect(self._log_msg)
         worker.finished.connect(self._on_load_done)
         worker.error.connect(self._on_load_error)
+        worker.email_check_ready.connect(self._on_email_check_ready)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
 
@@ -841,22 +852,35 @@ class MainWindow(QMainWindow):
         self._btn_write_back.show()
 
     def _on_write_back(self) -> None:
-        """Schreibt die gesammelten Daten \u00fcber den Adapter zur\u00fcck."""
+        """Schreibt die gesammelten Daten über den Adapter zurück."""
         if not self._pending_write_back:
             return
+        if (
+            self._perform_write_back(self._pending_write_back, "generierte Werte")
+            is not None
+        ):
+            self._pending_write_back.clear()
+            self._btn_write_back.hide()
 
+    def _perform_write_back(
+        self, updates: list[dict], label: str
+    ) -> tuple[int, int] | None:
+        """Schreibt Updates über den Adapter zurück und loggt das Ergebnis.
+
+        Returns (ok, fehler), oder None wenn der Write-back gar nicht
+        möglich war (Adapter ohne Write-back, Exception).
+        """
         try:
             adapter = load_adapter(self._settings)
             if not adapter.supports_write_back():
                 self._log_msg(
-                    "Adapter unterst\u00fctzt kein Write-back. "
-                    "Daten im Log oben manuell \u00fcbertragen."
+                    "Adapter unterstützt kein Write-back. "
+                    "Daten im Log oben manuell übertragen."
                 )
-                return
+                return None
 
-            count = len(self._pending_write_back)
-            self._log_msg(f"\nSchreibe {count} generierte Werte zur\u00fcck...")
-            results = adapter.write_back(self._pending_write_back)
+            self._log_msg(f"\nSchreibe {len(updates)} {label} zurück...")
+            results = adapter.write_back(updates)
             ok = sum(1 for r in results if r.get("success"))
             fail = len(results) - ok
             self._log_msg(f"Write-back: {ok} OK, {fail} Fehler")
@@ -865,19 +889,69 @@ class MainWindow(QMainWindow):
                     sid = r.get("school_internal_id", "?")
                     self._log_msg(f"  ✗ {sid}: {r.get('message', '')}")
 
-            # Dateipfad anzeigen (CSV-Adapter gibt Pfad in message zur\u00fcck)
+            # Dateipfad anzeigen (CSV-Adapter gibt Pfad in message zurück)
             for r in results:
                 msg = r.get("message", "")
                 if msg and r.get("success") and ("/" in msg or "\\" in msg):
                     self._log_msg(f"Exportiert nach: {msg}")
                     break
-
-            self._pending_write_back.clear()
-            self._btn_write_back.hide()
+            return ok, fail
 
         except Exception as exc:
             self._log_msg(f"Write-back Fehler: {exc}")
             QMessageBox.critical(self, "Write-back Fehler", str(exc))
+            return None
+
+    # --- Email-Korrekturen (Klassenwechsel) ---
+
+    def _on_email_check_ready(self, suggestions: list) -> None:
+        """Empfängt Vorschläge für Email-Korrekturen vom LoadWorker."""
+        self._email_suggestions = list(suggestions)
+        n = len(self._email_suggestions)
+        if n:
+            self._btn_email_update.setText(f"Email-Adressen aktualisieren ({n})")
+            self._btn_email_update.show()
+        else:
+            self._btn_email_update.hide()
+
+    def _on_email_update(self) -> None:
+        """Dialog mit den Vorschlägen; ausgewählte Adressen nach SchILD schreiben."""
+        if not self._email_suggestions or self._is_busy():
+            return
+
+        dlg = EmailUpdateDialog(self._email_suggestions, parent=self)
+        if dlg.exec() != EmailUpdateDialog.DialogCode.Accepted:
+            return
+        updates = dlg.selected_updates()
+        if not updates:
+            return
+
+        for u in updates:
+            self._log_msg(
+                f"  {u.get('class_name', '')}: {u.get('last_name', '')}, "
+                f"{u.get('first_name', '')}: {u.get('old_email', '')} "
+                f"→ {u.get('email', '')}"
+            )
+        outcome = self._perform_write_back(updates, "Email-Adressen")
+        if outcome is None:
+            return
+        ok, fail = outcome
+
+        # Ergebnis VOR dem Neuladen zeigen — _on_load_data leert das Log.
+        QMessageBox.information(
+            self,
+            "Email-Adressen aktualisiert",
+            f"{ok} Adressen in SchILD aktualisiert"
+            + (f", {fail} Fehler (siehe Log)" if fail else "")
+            + ".\n\nDie Quelldaten werden jetzt neu geladen. Danach im "
+            'M365-Plugin "Berechnen" → "Anwenden" ausführen, um die '
+            "Adressen auch in Microsoft 365 zu ändern.",
+        )
+
+        # Quelldaten neu laden, damit die neuen Adressen in den Records
+        # stehen — danach zeigt M365 "Berechnen" die Schüler als geändert
+        # und "Anwenden" setzt den neuen UPN.
+        self._on_load_data()
 
     # --- Close-Event ---
 

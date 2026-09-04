@@ -105,7 +105,7 @@ def generate_email(
     k = _sanitize(transliterate(class_name))
     v3 = v[:3] if len(v) >= 3 else v
 
-    local_part = template.replace("{v}", v).replace("{n}", n).replace("{k}", k)
+    local_part = _render_local_part(template, v, n, k)
     email = f"{local_part}@{domain}"
 
     if existing_emails is None or email.lower() not in existing_emails:
@@ -125,3 +125,69 @@ def _sanitize(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9.\-]", "", text)
     return text
+
+
+def _render_local_part(template: str, v: str, n: str, k: str) -> str:
+    """Setzt die (bereits sanitisierten) Werte ins Template ein."""
+    return template.replace("{v}", v).replace("{n}", n).replace("{k}", k)
+
+
+def _template_pattern(template: str, v: str, n: str) -> re.Pattern[str]:
+    """Baut aus dem Template ein Regex, das den Klassenteil einfängt.
+
+    Vor-/Nachname sind literal (bekannt), ``{k}`` wird zur Capture-Gruppe.
+    Ein optionales Kollisions-Suffix (``.han``) am Ende ist erlaubt.
+    """
+    parts = re.split(r"(\{k\}|\{v\}|\{n\})", template)
+    out: list[str] = []
+    for part in parts:
+        if part == "{k}":
+            out.append(r"(?P<k>[a-z0-9.\-]+?)")
+        elif part == "{v}":
+            out.append(re.escape(v))
+        elif part == "{n}":
+            out.append(re.escape(n))
+        elif part:
+            out.append(re.escape(part))
+    return re.compile("^" + "".join(out) + r"(?:\.[a-z0-9]{1,3})?$")
+
+
+def analyze_email(
+    current: str,
+    first_name: str,
+    last_name: str,
+    class_name: str,
+    domain: str,
+    template: str = "{v}.{n}",
+) -> dict | None:
+    """Prüft, ob eine bestehende Email noch zum Schema (Template) passt.
+
+    Returns:
+        None  — Adresse passt (auch mit Kollisions-Suffix) oder ist nicht
+                prüfbar (leer, fremde Domain → wird nicht angefasst).
+        dict  — {"reason": "class_change", "old_class": "10a"} wenn der
+                Klassenteil der Adresse nicht mehr zur Klasse passt, oder
+                {"reason": "mismatch", "old_class": ""} bei sonstiger
+                Abweichung (z.B. Namensänderung, manuell vergebene Adresse).
+    """
+    current = (current or "").strip().lower()
+    if not current or "@" not in current:
+        return None
+    local, _, cur_domain = current.rpartition("@")
+    if cur_domain != domain.strip().lower():
+        return None
+
+    v = _sanitize(transliterate(first_name))
+    n = _sanitize(transliterate(last_name))
+    k = _sanitize(transliterate(class_name))
+    v3 = v[:3]
+
+    expected = _render_local_part(template, v, n, k)
+    if local == expected or (v3 and local == f"{expected}.{v3}"):
+        return None
+
+    match = _template_pattern(template, v, n).match(local)
+    old_k = match.groupdict().get("k") if match else None
+    if old_k and old_k != k:
+        return {"reason": "class_change", "old_class": old_k}
+    return {"reason": "mismatch", "old_class": ""}

@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from core.engine import compute_changeset
 from core.models import ChangeSet
-from core.plugin_loader import load_adapter
+from core.plugin_loader import load_adapter, load_plugins
 from plugins.base import PluginBase, failure_reason, is_success
 
 log = logging.getLogger(__name__)
@@ -19,6 +19,8 @@ class LoadWorker(QObject):
     finished = Signal(list, list)  # (students, teachers)
     error = Signal(str)
     log_signal = Signal(str)
+    # Vorschläge für Email-Korrekturen in SchILD (z.B. nach Klassenwechsel)
+    email_check_ready = Signal(list)
 
     def __init__(self, settings: dict) -> None:
         super().__init__()
@@ -29,6 +31,40 @@ class LoadWorker(QObject):
         log.info(msg)
         self.log_signal.emit(msg)
 
+    def _check_emails(self, all_students: list, visible_students: list) -> list[dict]:
+        """Lässt aktive Plugins die SchILD-Emails gegen ihr Schema prüfen.
+
+        Kollisionen werden über ALLE Schüler geprüft (auch bei aktivem
+        Klassenfilter), angezeigt werden nur Vorschläge für sichtbare.
+        Reine Berechnung — keine API-Zugriffe.
+        """
+        from dataclasses import asdict
+
+        try:
+            plugins = load_plugins(self.settings)
+        except Exception as exc:
+            self._emit(f"⚠ Email-Prüfung übersprungen: {exc}")
+            return []
+        if not plugins:
+            return []
+
+        all_dicts = [asdict(s) for s in all_students]
+        visible_ids = {s.school_internal_id for s in visible_students}
+        seen: set[str] = set()
+        suggestions: list[dict] = []
+        for name, plugin in plugins:
+            try:
+                found = plugin.check_source_emails(all_dicts)
+            except Exception as exc:
+                self._emit(f"⚠ Email-Prüfung ({name}) fehlgeschlagen: {exc}")
+                continue
+            for item in found:
+                sid = item.get("school_internal_id", "")
+                if sid in visible_ids and sid not in seen:
+                    seen.add(sid)
+                    suggestions.append(item)
+        return suggestions
+
     @Slot()
     def run(self) -> None:
         try:
@@ -38,6 +74,7 @@ class LoadWorker(QObject):
                 self._emit("Lade Schülerdaten...")
                 adapter = load_adapter(self.settings)
                 students = adapter.load()
+                all_students = list(students)
                 self._emit(f"{len(students)} Schüler geladen.")
 
                 # Kurs-Statistik (Diagnostik für LuL-Gruppen)
@@ -87,9 +124,30 @@ class LoadWorker(QObject):
                 else:
                     self._emit("Keine Lehrerdaten (Quelle nicht konfiguriert).")
 
+                # Email-Schema-Prüfung (z.B. Klassenwechsel → Adresse in
+                # SchILD veraltet). Ergebnis geht an den Button
+                # "Email-Adressen aktualisieren" im Hauptfenster.
+                suggestions = self._check_emails(all_students, students)
+                if suggestions:
+                    n_class = sum(
+                        1 for s in suggestions if s.get("reason") == "class_change"
+                    )
+                    n_other = len(suggestions) - n_class
+                    parts = []
+                    if n_class:
+                        parts.append(f"{n_class} nach Klassenwechsel")
+                    if n_other:
+                        parts.append(f"{n_other} sonstige Abweichungen")
+                    self._emit(
+                        f"⚠ {len(suggestions)} Email-Adressen passen nicht mehr "
+                        f"zum Schema ({', '.join(parts)}) → "
+                        f"Button 'Email-Adressen aktualisieren'"
+                    )
+
                 for w in caught:
                     self._emit(f"⚠ {w.message}")
 
+            self.email_check_ready.emit(suggestions)
             self.finished.emit(students, teachers)
 
         except Exception as exc:
