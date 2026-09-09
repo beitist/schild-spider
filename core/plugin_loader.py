@@ -93,7 +93,18 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 # v10: adapter_configs (Configs ALLER Adapter bleiben beim Wechsel erhalten)
 # v11: hagen_id_lehrer Plugin + person_typ im schild_db Adapter
 # v12: m365.email_change_mode (Verhalten bei Email-Änderung)
-SETTINGS_VERSION = 12
+# v13: m365 auto_write_back / sync_sus_groups / sync_kuk_groups (bool-Felder)
+SETTINGS_VERSION = 13
+
+
+def as_bool(value: object) -> bool:
+    """Toleranter Bool-Parser für Settings-Werte (bool, "true", "1", "ja").
+
+    Settings können bool (aus dem Dialog) oder Strings (Hand-Edit) enthalten.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "ja", "yes", "on")
 
 
 def generate_default_settings(

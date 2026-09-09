@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.models import ConfigField
 from core.plugin_loader import (
+    as_bool,
     get_adapter_class,
     get_adapter_registry,
     get_plugin_class,
@@ -265,6 +266,13 @@ class _ConfigPage(QWidget):
         schema: list[ConfigField] = self._config_class.config_schema()
 
         for field in schema:
+            if field.field_type == "bool":
+                chk = QCheckBox(field.label)
+                chk.setChecked(as_bool(self._config.get(field.key, field.default)))
+                form.addRow("", chk)
+                self._field_widgets[field.key] = chk
+                continue
+
             if field.field_type == "choice":
                 combo = QComboBox()
                 combo.setMinimumHeight(32)
@@ -354,7 +362,9 @@ class _ConfigPage(QWidget):
         if self._chk_enabled is not None:
             config["enabled"] = self._chk_enabled.isChecked()
         for key, widget in self._field_widgets.items():
-            if isinstance(widget, QComboBox):
+            if isinstance(widget, QCheckBox):
+                config[key] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
                 config[key] = widget.currentData() or ""
             else:
                 config[key] = widget.text().strip()

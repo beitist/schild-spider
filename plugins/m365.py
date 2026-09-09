@@ -13,6 +13,7 @@ import warnings
 from core.email_generator import analyze_email, generate_email
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
+from core.plugin_loader import as_bool
 from plugins.base import PluginBase
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,9 @@ class M365Plugin(PluginBase):
         display_name_template: str = "",
         default_password: str = "",
         email_change_mode: str = EMAIL_CHANGE_UPN,
+        sync_sus_groups: bool = True,
+        sync_kuk_groups: bool = True,
+        auto_write_back: bool = False,
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
@@ -53,6 +57,9 @@ class M365Plugin(PluginBase):
             if email_change_mode in (EMAIL_CHANGE_UPN, EMAIL_CHANGE_NEW_ACCOUNT)
             else EMAIL_CHANGE_UPN
         )
+        self._sync_sus_groups = as_bool(sync_sus_groups)
+        self._sync_kuk_groups = as_bool(sync_kuk_groups)
+        self._auto_write_back = as_bool(auto_write_back)
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
@@ -155,6 +162,27 @@ class M365Plugin(PluginBase):
                     ),
                 ],
             ),
+            ConfigField(
+                key="auto_write_back",
+                label="Generierte Emails automatisch nach SchILD zurückschreiben",
+                field_type="bool",
+                default=False,
+                required=False,
+            ),
+            ConfigField(
+                key="sync_sus_groups",
+                label="Klassengruppen (SuS) synchronisieren",
+                field_type="bool",
+                default=True,
+                required=False,
+            ),
+            ConfigField(
+                key="sync_kuk_groups",
+                label="Lehrergruppen (KuK) synchronisieren",
+                field_type="bool",
+                default=True,
+                required=False,
+            ),
         ]
 
     @classmethod
@@ -172,6 +200,9 @@ class M365Plugin(PluginBase):
             display_name_template=config.get("display_name_template", "{k} {n}, {v}"),
             default_password=config.get("default_password", "Schule2223!"),
             email_change_mode=config.get("email_change_mode", EMAIL_CHANGE_UPN),
+            sync_sus_groups=config.get("sync_sus_groups", True),
+            sync_kuk_groups=config.get("sync_kuk_groups", True),
+            auto_write_back=config.get("auto_write_back", False),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -236,6 +267,7 @@ class M365Plugin(PluginBase):
                         "school_internal_id": eid,
                         "data_hash": data_hash,
                         "is_active": is_active,
+                        "fields": student_dict,  # Ist-Werte für die Diff-Vorschau
                     }
                 )
             elif upn:
@@ -244,6 +276,7 @@ class M365Plugin(PluginBase):
                     "school_internal_id": "",
                     "data_hash": data_hash,
                     "is_active": is_active,
+                    "fields": student_dict,
                 }
         return manifest
 
@@ -833,6 +866,14 @@ class M365Plugin(PluginBase):
         self, all_students: list[dict], teachers: list[dict]
     ) -> list[dict]:
         """Berechnet geplante Gruppenänderungen (SOLL vs IST) für die Vorschau."""
+        if not self._sync_sus_groups and not self._sync_kuk_groups:
+            log.info("Gruppen-Sync deaktiviert (Klassen- und Lehrergruppen).")
+            return []
+        if not self._sync_sus_groups:
+            log.info("Klassengruppen (SuS) deaktiviert — nur Lehrergruppen.")
+        if not self._sync_kuk_groups:
+            log.info("Lehrergruppen (KuK) deaktiviert — nur Klassengruppen.")
+
         self._build_lookups()
 
         # Lehrer-Matching: Kürzel → Email direkt aus den Kursdaten.
@@ -944,8 +985,10 @@ class M365Plugin(PluginBase):
 
         changes: list[dict] = []
         for class_name, class_students in sorted(classes.items()):
-            changes.extend(self._diff_class_sus(class_name, class_students))
-            changes.extend(self._diff_class_kuk(class_name, class_students))
+            if self._sync_sus_groups:
+                changes.extend(self._diff_class_sus(class_name, class_students))
+            if self._sync_kuk_groups:
+                changes.extend(self._diff_class_kuk(class_name, class_students))
         return changes
 
     def _diff_class_sus(self, class_name: str, students: list[dict]) -> list[dict]:

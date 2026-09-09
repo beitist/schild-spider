@@ -135,6 +135,11 @@ class WebUntisPlugin(PluginBase):
                     "school_internal_id": sid,
                     "data_hash": data_hash,
                     "is_active": True,
+                    # Ist-Werte für die Diff-Vorschau (nur was der Export hergibt)
+                    "fields": {
+                        "email": (row.get("E-Mail Adresse") or "").strip(),
+                        "last_name": (row.get("Person") or "").strip(),
+                    },
                 }
             )
 

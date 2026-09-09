@@ -234,6 +234,7 @@ class MoodlePlugin(PluginBase):
                     "school_internal_id": idnum,
                     "data_hash": self.compute_data_hash(student_dict),
                     "is_active": not u.get("suspended", False),
+                    "fields": student_dict,  # Ist-Werte für die Diff-Vorschau
                 }
             )
         return manifest

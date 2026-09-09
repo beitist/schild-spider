@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import ChangeSet, StudentRecord, TeacherRecord
-from core.plugin_loader import get_plugin_class, load_adapter, load_settings
+from core.plugin_loader import as_bool, get_plugin_class, load_adapter, load_settings
 from gui.email_update_dialog import EmailUpdateDialog
 from gui.plugin_card import PluginCard, PluginCardState
 from gui.settings_dialog import SettingsDialog
@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self._worker_thread: QThread | None = None
         self._pending_write_back: list[dict] = []
         self._email_suggestions: list[dict] = []  # aus LoadWorker.email_check_ready
+        self._keep_log_on_load = False  # Auto-Reload nach Write-back: Log behalten
         self._apply_stats: dict[str, tuple[int, int]] = {}  # key → (ok, fehler)
         self._apply_had_error = False
 
@@ -149,10 +150,12 @@ class MainWindow(QMainWindow):
 
         # Rückschreiben-Button (hidden bis Write-back-Daten vorliegen)
         self._btn_write_back = QPushButton("R\u00fcckschreiben")
+        # Auffällig, damit ein verschobenes Rückschreiben nicht untergeht
         self._btn_write_back.setStyleSheet(
-            "padding: 6px 14px; font-size: 13px; font-weight: bold;"
+            "padding: 8px 14px; font-size: 13px; font-weight: bold;"
+            "background-color: #fdebd0; border: 2px solid #e67e22; border-radius: 4px;"
         )
-        self._btn_write_back.clicked.connect(self._on_write_back)
+        self._btn_write_back.clicked.connect(lambda: self._on_write_back())
         self._btn_write_back.hide()
         left_layout.addWidget(self._btn_write_back)
 
@@ -283,7 +286,10 @@ class MainWindow(QMainWindow):
         if self._is_busy():
             return
 
-        self._log.clear()
+        if self._keep_log_on_load:
+            self._keep_log_on_load = False
+        else:
+            self._log.clear()
         self._students.clear()
         self._teachers.clear()
         self._pending_write_back.clear()
@@ -491,7 +497,7 @@ class MainWindow(QMainWindow):
         self._enable_all_actions()
 
         # Nach einem Abbruch (Exception) hat _on_plugin_worker_error bereits
-        # den Fehlerdialog gezeigt \u2014 kein zus\u00e4tzlicher "Fertig"-Dialog.
+        # den Fehlerdialog gezeigt — kein zusätzlicher "Fertig"-Dialog.
         if self._apply_had_error:
             return
 
@@ -503,23 +509,62 @@ class MainWindow(QMainWindow):
         ok, fail = self._apply_stats.pop(plugin_key, (0, 0))
 
         if fail:
-            self._log_msg(
-                f"\nSynchronisation f\u00fcr {name} abgeschlossen: {ok} OK, {fail} Fehler."
+            summary = (
+                f"Synchronisation für {name} abgeschlossen: {ok} OK, {fail} Fehler."
             )
-            QMessageBox.warning(
-                self,
-                "Abgeschlossen mit Fehlern",
-                f"Synchronisation f\u00fcr {name} abgeschlossen:\n"
-                f"{ok} OK, {fail} Fehler.\n\n"
-                f"Details stehen im Log.",
-            )
+            self._log_msg(f"\n{summary}")
+            body = f"{summary}\n\nDetails stehen im Log."
+            icon = QMessageBox.Icon.Warning
+            title = "Abgeschlossen mit Fehlern"
         else:
-            self._log_msg(f"\nSynchronisation f\u00fcr {name} abgeschlossen.")
-            QMessageBox.information(
-                self,
-                "Fertig",
-                f"Synchronisation f\u00fcr {name} erfolgreich abgeschlossen.",
+            summary = f"Synchronisation für {name} erfolgreich abgeschlossen."
+            self._log_msg(f"\n{summary}")
+            body = summary
+            icon = QMessageBox.Icon.Information
+            title = "Fertig"
+
+        # Write-back-Daten (z.B. generierte Emails) direkt anbieten — der
+        # Button unten wird sonst leicht übersehen.
+        pending = len(self._pending_write_back)
+        if pending and self._plugin_auto_write_back(plugin_key):
+            body += (
+                f"\n\n{pending} generierte Werte werden automatisch nach "
+                f"SchILD zurückgeschrieben, danach werden die Quelldaten neu geladen."
             )
+            box = QMessageBox(icon, title, body, QMessageBox.StandardButton.Ok, self)
+            box.exec()
+            self._on_write_back()
+            return
+
+        if pending:
+            body += (
+                f"\n\n{pending} generierte Werte (z.B. Email-Adressen) liegen vor.\n"
+                f"Jetzt nach SchILD zurückschreiben? Die Quelldaten werden danach "
+                f"automatisch neu geladen."
+            )
+            box = QMessageBox(
+                icon,
+                title,
+                body,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                self,
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Yes)
+            if box.exec() == QMessageBox.StandardButton.Yes:
+                self._on_write_back()
+            else:
+                self._log_msg(
+                    f"Rückschreiben verschoben — {pending} Werte warten "
+                    f"(Button 'Rückschreiben' unten links)."
+                )
+            return
+
+        QMessageBox(icon, title, body, QMessageBox.StandardButton.Ok, self).exec()
+
+    def _plugin_auto_write_back(self, plugin_key: str) -> bool:
+        """Liest die Plugin-Option 'auto_write_back' aus den Settings."""
+        cfg = self._settings.get("plugins", {}).get(plugin_key, {})
+        return as_bool(cfg.get("auto_write_back", False))
 
     # --- Vorschau-Tree mit Checkboxen ---
 
@@ -593,11 +638,7 @@ class MainWindow(QMainWindow):
             child = QTreeWidgetItem(cat)
             child.setText(0, f"{s['last_name']}, {s['first_name']}")
             if show_class:
-                email = (s.get("email") or "").strip()
-                info = f"Klasse: {s['class_name']}"
-                if email:
-                    info += f" | {email}"
-                child.setText(1, info)
+                child.setText(1, self._describe_student_change(s))
             elif detail:
                 child.setText(1, detail)
             child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -616,6 +657,31 @@ class MainWindow(QMainWindow):
             cat.setCheckState(0, Qt.CheckState.PartiallyChecked)
         else:
             cat.setCheckState(0, Qt.CheckState.Unchecked)
+
+    @staticmethod
+    def _describe_student_change(s: dict) -> str:
+        """Detail-Text für einen Vorschau-Eintrag (neu oder geändert).
+
+        Geändert: konkrete Unterschiede aus der Engine (``_diff``), z.B.
+        "Email: alt → neu; Klasse: 10a → 10b". Neu: Klasse + Email, wobei
+        eine vom Plugin generierte Adresse als "Email neu" markiert ist.
+        """
+        diff = s.get("_diff")
+        if diff:
+            text = "; ".join(diff)
+            if not any(part.startswith("Klasse") for part in diff):
+                text = f"Klasse: {s.get('class_name', '')} | {text}"
+            return text
+
+        info = f"Klasse: {s.get('class_name', '')}"
+        email = (s.get("email") or "").strip()
+        if email and s.get("_email_generated"):
+            info += f" | Email neu: {email}"
+        elif email:
+            info += f" | {email}"
+        else:
+            info += " | keine Email"
+        return info
 
     def _add_preview_suspend_category(
         self,
@@ -851,8 +917,14 @@ class MainWindow(QMainWindow):
         self._btn_write_back.setText(f"R\u00fcckschreiben ({count})")
         self._btn_write_back.show()
 
-    def _on_write_back(self) -> None:
-        """Schreibt die gesammelten Daten über den Adapter zurück."""
+    def _on_write_back(self, *, reload: bool = True) -> None:
+        """Schreibt die gesammelten Daten über den Adapter zurück.
+
+        Danach werden die Quelldaten neu geladen (reload=True), damit der
+        nächste Sync die zurückgeschriebenen Werte sieht. Beim Schließen
+        des Fensters (closeEvent) wird reload=False übergeben — ein
+        laufender Load-Thread beim Beenden wäre ein Absturzrisiko.
+        """
         if not self._pending_write_back:
             return
         if (
@@ -861,6 +933,16 @@ class MainWindow(QMainWindow):
         ):
             self._pending_write_back.clear()
             self._btn_write_back.hide()
+            if reload:
+                self._reload_source_data()
+
+    def _reload_source_data(self) -> None:
+        """Quelldaten neu laden, ohne das Log zu leeren (nach Write-back)."""
+        if self._is_busy():
+            return
+        self._keep_log_on_load = True
+        self._log_msg("\n--- Quelldaten werden neu geladen ---")
+        self._on_load_data()
 
     def _perform_write_back(
         self, updates: list[dict], label: str
@@ -937,7 +1019,6 @@ class MainWindow(QMainWindow):
             return
         ok, fail = outcome
 
-        # Ergebnis VOR dem Neuladen zeigen — _on_load_data leert das Log.
         QMessageBox.information(
             self,
             "Email-Adressen aktualisiert",
@@ -951,7 +1032,7 @@ class MainWindow(QMainWindow):
         # Quelldaten neu laden, damit die neuen Adressen in den Records
         # stehen — danach zeigt M365 "Berechnen" die Schüler als geändert
         # und "Anwenden" setzt den neuen UPN.
-        self._on_load_data()
+        self._reload_source_data()
 
     # --- Close-Event ---
 
@@ -969,7 +1050,7 @@ class MainWindow(QMainWindow):
                 | QMessageBox.StandardButton.Cancel,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                self._on_write_back()
+                self._on_write_back(reload=False)
                 event.accept()
             elif reply == QMessageBox.StandardButton.Discard:
                 event.accept()

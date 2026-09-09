@@ -49,6 +49,7 @@ def compute_changeset(
 
         # Daten-Hash vergleichen
         if student["_data_hash"] != target.get("data_hash", ""):
+            student["_diff"] = describe_diff(student, target.get("fields"))
             changed.append(student)
 
         # Foto-Hash vergleichen (falls Foto vorhanden)
@@ -77,3 +78,42 @@ def compute_changeset(
         suspend_percentage=round(suspend_pct, 1),
         requires_force=requires_force,
     )
+
+
+# Feld → Anzeigename für die Diff-Beschreibung in der Vorschau
+_DIFF_LABELS: tuple[tuple[str, str], ...] = (
+    ("email", "Email"),
+    ("class_name", "Klasse"),
+    ("last_name", "Nachname"),
+    ("first_name", "Vorname"),
+    ("dob", "Geburtsdatum"),
+)
+
+
+def describe_diff(student: dict, target_fields: dict | None) -> list[str]:
+    """Beschreibt, was sich zwischen SchILD und Zielsystem geändert hat.
+
+    Vergleicht nur Felder, die das Zielsystem im Manifest mitliefert
+    (``fields``). Ohne Ist-Werte bleibt nur die generische Aussage.
+    Returns: z.B. ["Email: alt@x.de → neu@x.de", "Klasse: 10a → 10b"]
+    """
+    if not target_fields:
+        return ["Daten geändert"]
+
+    parts: list[str] = []
+    for key, label in _DIFF_LABELS:
+        if key not in target_fields:
+            continue
+        new = str(student.get(key) or "").strip()
+        old = str(target_fields.get(key) or "").strip()
+        same = new.lower() == old.lower() if key == "email" else new == old
+        if same:
+            continue
+        if not old:
+            parts.append(f"{label} neu: {new}")
+        elif not new:
+            parts.append(f"{label} entfernt (war: {old})")
+        else:
+            parts.append(f"{label}: {old} → {new}")
+
+    return parts or ["Daten geändert"]

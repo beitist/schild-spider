@@ -27,9 +27,9 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 - **Failsafe-Schutz** — Bei >15% Deaktivierungen ist eine explizite Bestätigung nötig, bei >50% eine doppelte (Schutz vor unvollständigen Datenexporten)
 - **Plugin-System** — Jedes Plugin beschreibt sich selbst (Config-Felder, Verbindungstest), die GUI rendert dynamisch
 - **Adapter-System** — Verschiedene Datenquellen (CSV-Export, DB-Zugriff) über einheitliche Schnittstelle
-- **Email-Vorschau** — Generierte Email-Adressen werden vor dem Anwenden in der Vorschau angezeigt
+- **Änderungsvorschau mit Details** — Generierte Email-Adressen und konkrete Unterschiede (Email alt → neu, Klasse alt → neu, Name) werden vor dem Anwenden angezeigt
 - **Klassengruppen** — Automatische Erstellung von SuS- und KuK-Gruppen pro Klasse (M365), Kurs-Sync (Moodle)
-- **Write-Back** — Generierte Email-Adressen können in die SchILD-DB zurückgeschrieben werden
+- **Write-Back** — Generierte Email-Adressen werden nach dem Anwenden direkt zum Rückschreiben in die SchILD-DB angeboten (oder automatisch, per Plugin-Option); danach werden die Quelldaten automatisch neu geladen
 - **Email-Korrektur nach Klassenwechsel** — Beim Laden werden SchILD-Emails gegen das Template geprüft (z.B. `{k}.{n}`); veraltete Adressen können per Dialog in SchILD aktualisiert werden, der M365-Sync zieht den UPN danach nach
 - **Email-Fallback-Matching** — Bestehende M365-Accounts werden per Email erkannt, auch ohne employeeId
 - **Crash-Diagnostik** — Worker-Logging in `spider.log`, nativer Crash-Traceback via `faulthandler`
@@ -182,6 +182,14 @@ Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
 |---|---|
 | **Adresse ändern** (Standard) | UPN und mailNickname werden am bestehenden Konto umbenannt — Postfach, OneDrive und Gruppen bleiben. Zusätzlich wird versucht, die primäre Mailadresse (`mail`) nachzuziehen; lehnt Exchange das ab, erscheint eine Warnung mit alt → neu zum manuellen Nachziehen. |
 | **Neues Konto anlegen, altes deaktivieren** | Neues Konto mit der neuen Adresse (inkl. Lizenz), danach wird das alte Konto deaktiviert, seine employeeId entfernt und der Anzeigename mit „(alt)" markiert. |
+
+### 7. Weitere Optionen
+
+| Option | Wirkung |
+|---|---|
+| **Generierte Emails automatisch nach SchILD zurückschreiben** | Nach dem Anwenden wird ohne Rückfrage zurückgeschrieben. Standard: aus — dann fragt der Abschluss-Dialog nach; bei „Nein" bleibt der Button „Rückschreiben" sichtbar. |
+| **Klassengruppen (SuS) synchronisieren** | Gruppen pro Klasse (SuS + Klassenleitung) berechnen und pflegen. Abschaltbar, z.B. solange die Lehrerdaten in SchILD unvollständig sind. |
+| **Lehrergruppen (KuK) synchronisieren** | Gruppen mit allen Lehrkräften einer Klasse (aus Leistungsdaten + Klassenleitung). Ebenfalls abschaltbar. |
 
 Die Email-Änderung selbst wird in SchILD vorbereitet: Beim Laden der Quelldaten erkennt Schild Spider Adressen, die nicht mehr zum Template passen, und bietet sie über **„Email-Adressen aktualisieren"** zum Rückschreiben an. Danach **Berechnen → Anwenden** im M365-Plugin.
 
