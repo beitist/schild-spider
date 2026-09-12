@@ -1,0 +1,13 @@
+# Ruff-Konfiguration für Schild Spider.
+#
+# Ohne diese Datei prüft die CLI dank .gitignore andere Dateien als die
+# Editor-Erweiterung: Die CLI überspringt ignorierte Dateien, der Editor
+# zeigt sie trotzdem an. Dadurch erscheinen im Editor Meldungen zu
+# Dateien, die gar nicht im Repository liegen.
+#
+# Persönliche Hilfsskripte, die nicht eingecheckt sind und nicht zum
+# Projektstandard gehören:
+extend-exclude = [
+    "csv-generieren.py",
+    "test_webuntis.py",
+]
