@@ -13,13 +13,14 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from core.paths import asset_path, data_dir, settings_path
+from core.version import (
+    APP_COPYRIGHT,
+    APP_LICENSE,
+    APP_NAME,
+    APP_VERSION,
+    version_label,
+)
 from gui.mainwindow import MainWindow
-
-# --- App-Metadaten ---
-APP_NAME = "Schild Spider"
-APP_VERSION = "0.7.5"
-APP_COPYRIGHT = "© 2025–2026"
-APP_LICENSE = "GPL v3"
 
 
 def _build_splash_pixmap() -> QPixmap | None:
@@ -162,6 +163,13 @@ def _install_exception_hook() -> None:
 def main() -> None:
     _setup_logging()
     _install_exception_hook()
+
+    # Erste Zeile in spider.log: Version und Ablageort. Ohne das lässt
+    # sich einem eingeschickten Log nicht ansehen, welcher Stand ihn
+    # erzeugt hat.
+    logging.getLogger("core").info(
+        "%s gestartet — Daten und Logs in %s", version_label(), data_dir()
+    )
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

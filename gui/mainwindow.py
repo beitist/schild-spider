@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.models import ChangeSet, StudentRecord, TeacherRecord
 from core.plugin_loader import as_bool, get_plugin_class, load_adapter, load_settings
+from core.version import version_label
 from gui.email_update_dialog import EmailUpdateDialog
 from gui.plugin_card import PluginCard, PluginCardState
 from gui.settings_dialog import SettingsDialog
@@ -65,7 +66,9 @@ class _QtLogHandler(logging.Handler):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Schild Spider")
+        # Version im Titel: sonst ist von außen nicht erkennbar, welcher
+        # Stand läuft (die Splash-Anzeige ist nach Sekunden wieder weg).
+        self.setWindowTitle(version_label())
         self.setMinimumSize(900, 600)
 
         self._settings: dict = {}
