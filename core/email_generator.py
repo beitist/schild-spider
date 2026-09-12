@@ -76,6 +76,56 @@ def transliterate(text: str) -> str:
     return "".join(result)
 
 
+def email_candidates(
+    first_name: str,
+    last_name: str,
+    class_name: str,
+    domain: str,
+    template: str = "{v}.{n}",
+    max_counter: int = 99,
+):
+    """Erzeugt Adress-Kandidaten in fester Eskalationsreihenfolge.
+
+    Bei häufigen Nachnamen (z.B. "Nguyen" in derselben Klasse) reicht das
+    Template allein nicht. Die Kette eskaliert deshalb schrittweise —
+    Beispiel für Template ``{k}.{n}``, Klasse AAV26S, Nguyen, "Thi Thuy":
+
+        Stufe 0: aav26s.nguyen@...          (Template)
+        Stufe 1: aav26s.nguyen.thi@...      (+ erster Vorname)
+        Stufe 2: aav26s.nguyen.thithuy@...  (+ erste zwei Vornamen)
+        Stufe 3: aav26s.nguyen.thi2@...     (+ erster Vorname + Zähler)
+
+    Stufen ohne Datengrundlage werden übersprungen (z.B. Stufe 2 bei nur
+    einem Vornamen). Die Reihenfolge ist rein datenabhängig und damit
+    reproduzierbar — gleiche Eingabe, gleiche Kette.
+    """
+    v = _sanitize(transliterate(first_name))
+    n = _sanitize(transliterate(last_name))
+    k = _sanitize(transliterate(class_name))
+    base = _render_local_part(template, v, n, k)
+
+    parts = _name_parts(first_name)
+    v1 = parts[0] if parts else ""
+    v12 = "".join(parts[:2]) if len(parts) > 1 else ""
+
+    emitted: set[str] = set()
+    for local in _candidate_locals(base, v1, v12, max_counter):
+        if local and local not in emitted:
+            emitted.add(local)
+            yield f"{local}@{domain}"
+
+
+def _candidate_locals(base: str, v1: str, v12: str, max_counter: int):
+    """Local-Parts der Eskalationsstufen (ohne Domain)."""
+    yield base
+    if v1:
+        yield f"{base}.{v1}"
+    if v12:
+        yield f"{base}.{v12}"
+    for i in range(2, max_counter + 1):
+        yield f"{base}.{v1}{i}" if v1 else f"{base}.{i}"
+
+
 def generate_email(
     first_name: str,
     last_name: str,
@@ -84,40 +134,81 @@ def generate_email(
     existing_emails: set[str] | None = None,
     class_name: str = "",
 ) -> str | None:
-    """Erzeugt eine Email-Adresse aus Vor-/Nachname + Domain.
+    """Erzeugt eine freie Email-Adresse für einen einzelnen Schüler.
 
-    Template-Platzhalter:
-        {v}  = Vorname (transliteriert, lowercase)
-        {n}  = Nachname (transliteriert, lowercase)
-        {k}  = Klasse (sanitized, lowercase)
-        {v3} = Vorname, erste 3 Buchstaben
+    Template-Platzhalter: ``{v}`` Vorname, ``{n}`` Nachname, ``{k}`` Klasse
+    (alle transliteriert und lowercase).
 
-    Kollisionsauflösung:
-        1. Template wie angegeben  → 10a.mueller@domain
-        2. Template + .{v3}        → 10a.mueller.han@domain
-        3. Gibt None zurück        → manueller Eingriff nötig
+    Nimmt den ersten freien Kandidaten aus :func:`email_candidates`.
+    Returns None, wenn auch die Zähler-Stufe erschöpft ist.
 
-    Returns None wenn auch nach Vornamen-Suffix keine eindeutige Adresse
-    möglich ist (→ Plugin zeigt Hinweis für manuellen Input).
+    Für mehrere Schüler auf einmal :func:`assign_emails` verwenden — nur
+    die Batch-Vergabe ist gegen die Reihenfolge der Quelldaten immun.
     """
-    v = _sanitize(transliterate(first_name))
-    n = _sanitize(transliterate(last_name))
-    k = _sanitize(transliterate(class_name))
-    v3 = v[:3] if len(v) >= 3 else v
-
-    local_part = _render_local_part(template, v, n, k)
-    email = f"{local_part}@{domain}"
-
-    if existing_emails is None or email.lower() not in existing_emails:
-        return email
-
-    # Kollision: Versuch mit Vornamens-Kürzel
-    candidate = f"{local_part}.{v3}@{domain}"
-    if candidate.lower() not in existing_emails:
-        return candidate
-
-    # Weiterhin Kollision → None (manueller Eingriff)
+    taken = {(e or "").lower() for e in (existing_emails or ())}
+    for candidate in email_candidates(
+        first_name, last_name, class_name, domain, template
+    ):
+        if candidate.lower() not in taken:
+            return candidate
     return None
+
+
+def assign_emails(
+    students: list[dict],
+    domain: str,
+    template: str = "{v}.{n}",
+    taken_emails=None,
+) -> dict[str, str | None]:
+    """Vergibt Adressen für mehrere Schüler kollisionsfrei und deterministisch.
+
+    Die Vergabe folgt NICHT der Reihenfolge der Eingabeliste, sondern der
+    SchILD-ID. Derselbe Datenbestand ergibt damit immer dieselbe Zuordnung
+    — egal ob die Quelldaten nach Name, Klasse oder gar nicht sortiert
+    ankommen, und egal ob Vorschau oder Anwenden die Vergabe auslöst.
+
+    students: Dicts mit school_internal_id, first_name, last_name, class_name
+    taken_emails: bereits vergebene Adressen (Zielsystem + Quelldaten)
+    Returns: {school_internal_id: email} — None, wenn keine Stufe frei war.
+    """
+    taken = {(e or "").strip().lower() for e in (taken_emails or ())} - {""}
+    result: dict[str, str | None] = {}
+
+    for student in sorted(students, key=_student_sort_key):
+        sid = str(student.get("school_internal_id", ""))
+        chosen: str | None = None
+        for candidate in email_candidates(
+            student.get("first_name", ""),
+            student.get("last_name", ""),
+            student.get("class_name", ""),
+            domain,
+            template,
+        ):
+            if candidate.lower() not in taken:
+                chosen = candidate
+                taken.add(candidate.lower())
+                break
+        result[sid] = chosen
+
+    return result
+
+
+def _student_sort_key(student: dict) -> tuple[int, int, str]:
+    """Stabiler Sortierschlüssel: numerische IDs numerisch, sonst alphabetisch."""
+    sid = str(student.get("school_internal_id", "")).strip()
+    if sid.isdigit():
+        return (0, int(sid), "")
+    return (1, 0, sid)
+
+
+def _name_parts(first_name: str) -> list[str]:
+    """Zerlegt den Vornamen in einzelne, sanitisierte Bestandteile.
+
+    "Thi Thuy" → ["thi", "thuy"], "Anne-Marie" → ["anne", "marie"]
+    """
+    raw = transliterate(first_name).replace("-", " ")
+    parts = [re.sub(r"[^a-z0-9]", "", part.lower()) for part in raw.split()]
+    return [p for p in parts if p]
 
 
 def _sanitize(text: str) -> str:
@@ -136,7 +227,7 @@ def _template_pattern(template: str, v: str, n: str) -> re.Pattern[str]:
     """Baut aus dem Template ein Regex, das den Klassenteil einfängt.
 
     Vor-/Nachname sind literal (bekannt), ``{k}`` wird zur Capture-Gruppe.
-    Ein optionales Kollisions-Suffix (``.han``) am Ende ist erlaubt.
+    Ein optionales Kollisions-Suffix (``.thithuy``, ``.thi2``) ist erlaubt.
     """
     parts = re.split(r"(\{k\}|\{v\}|\{n\})", template)
     out: list[str] = []
@@ -149,7 +240,7 @@ def _template_pattern(template: str, v: str, n: str) -> re.Pattern[str]:
             out.append(re.escape(n))
         elif part:
             out.append(re.escape(part))
-    return re.compile("^" + "".join(out) + r"(?:\.[a-z0-9]{1,3})?$")
+    return re.compile("^" + "".join(out) + r"(?:\.[a-z0-9]+)?$")
 
 
 def analyze_email(
@@ -180,10 +271,18 @@ def analyze_email(
     v = _sanitize(transliterate(first_name))
     n = _sanitize(transliterate(last_name))
     k = _sanitize(transliterate(class_name))
-    v3 = v[:3]
+    base = _render_local_part(template, v, n, k)
 
-    expected = _render_local_part(template, v, n, k)
-    if local == expected or (v3 and local == f"{expected}.{v3}"):
+    # Passt die Adresse zu irgendeiner Stufe der Eskalationskette?
+    for candidate in email_candidates(
+        first_name, last_name, class_name, domain, template
+    ):
+        if local == candidate.rpartition("@")[0]:
+            return None
+
+    # Altbestand aus früheren Versionen: Template + erste drei Buchstaben
+    # des Vornamens. Nicht mehr neu vergeben, aber weiterhin gültig.
+    if v[:3] and local == f"{base}.{v[:3]}":
         return None
 
     match = _template_pattern(template, v, n).match(local)

@@ -10,7 +10,7 @@ import string
 import time
 import warnings
 
-from core.email_generator import analyze_email, generate_email
+from core.email_generator import analyze_email, assign_emails
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
 from core.plugin_loader import as_bool
@@ -292,25 +292,45 @@ class M365Plugin(PluginBase):
         return hashlib.sha256(parts.encode()).hexdigest()
 
     def enrich_preview(self, changeset: ChangeSet) -> None:
-        """Generiert Emails für neue Schüler, damit sie in der Vorschau sichtbar sind."""
-        preview_emails = set(self._existing_emails)
-        for student in changeset.new:
-            email = (student.get("email") or "").strip()
-            if not email:
-                email = generate_email(
-                    student.get("first_name", ""),
-                    student.get("last_name", ""),
-                    self._domain,
-                    self._email_template,
-                    preview_emails,
-                    class_name=student.get("class_name", ""),
-                )
+        """Generiert Emails für neue Schüler, damit sie in der Vorschau sichtbar sind.
+
+        Die Vergabe läuft als Batch: Adressen sind untereinander und gegen
+        den M365-Bestand kollisionsfrei, und die Zuordnung hängt nicht von
+        der Reihenfolge der Quelldaten ab (siehe ``assign_emails``).
+        Genau diese Adressen legt ``apply_new`` später an.
+        """
+        pending = [s for s in changeset.new if not (s.get("email") or "").strip()]
+        if not pending:
+            return
+
+        assigned = assign_emails(
+            pending,
+            self._domain,
+            self._email_template,
+            self._taken_emails(changeset.new, changeset.changed),
+        )
+        for student in pending:
+            email = assigned.get(str(student.get("school_internal_id", "")))
+            if email:
+                student["email"] = email
+                # Markierung für apply_new: diese Email stammt von uns
+                # (nicht aus SchILD) → gehört in den Write-back.
+                student["_email_generated"] = True
+
+    def _taken_emails(self, *student_lists: list[dict]) -> set[str]:
+        """Alle bereits belegten Adressen: M365-Bestand + Quelldaten.
+
+        Adressen, die in SchILD stehen, aber noch kein M365-Konto haben,
+        müssen mitgezählt werden — sonst vergibt der Generator sie ein
+        zweites Mal an einen anderen Schüler.
+        """
+        taken = set(self._existing_emails)
+        for students in student_lists:
+            for s in students:
+                email = (s.get("email") or "").strip().lower()
                 if email:
-                    student["email"] = email
-                    # Markierung für apply_new: diese Email stammt von uns
-                    # (nicht aus SchILD) → gehört in den Write-back.
-                    student["_email_generated"] = True
-                    preview_emails.add(email.lower())
+                    taken.add(email)
+        return taken
 
     def _link_existing_user(self, user: dict, sid: str, student: dict) -> dict:
         """Verknüpft einen bestehenden M365-Account mit einer SchILD-ID."""
@@ -362,10 +382,25 @@ class M365Plugin(PluginBase):
 
     def apply_new(self, students: list[dict]) -> list[dict]:
         self._generated_emails = []
-        existing_emails = set(self._existing_emails) or self._collect_existing_emails()
+        if not self._existing_emails:
+            self._existing_emails = self._collect_existing_emails()
         # IST-Bestand VOR diesem Lauf: erlaubt den Existenz-Check lokal
         # statt per API-Probe pro Schüler (halbiert Requests und Laufzeit).
-        manifest_emails = frozenset(existing_emails)
+        manifest_emails = frozenset(self._existing_emails)
+
+        # Fallback, falls enrich_preview nicht lief: Adressen für Schüler
+        # ohne Email vorab als Batch vergeben (gleiches Ergebnis wie dort).
+        pending = [s for s in students if not (s.get("email") or "").strip()]
+        assigned = (
+            assign_emails(
+                pending,
+                self._domain,
+                self._email_template,
+                self._taken_emails(students),
+            )
+            if pending
+            else {}
+        )
         results: list[dict] = []
 
         for student in students:
@@ -374,20 +409,16 @@ class M365Plugin(PluginBase):
                 email = (student.get("email") or "").strip()
                 was_generated = bool(student.get("_email_generated"))
                 if not email:
-                    email = generate_email(
-                        student.get("first_name", ""),
-                        student.get("last_name", ""),
-                        self._domain,
-                        self._email_template,
-                        existing_emails,
-                        class_name=student.get("class_name", ""),
-                    )
-                    if email is None:
+                    email = assigned.get(str(sid))
+                    if not email:
                         results.append(
                             {
                                 "school_internal_id": sid,
                                 "success": False,
-                                "message": "Email-Kollision: manuell vergeben",
+                                "message": (
+                                    "Email-Kollision: alle Namensvarianten "
+                                    "belegt, bitte manuell vergeben"
+                                ),
                             }
                         )
                         continue
@@ -405,8 +436,6 @@ class M365Plugin(PluginBase):
                             "class_name": student.get("class_name", ""),
                         }
                     )
-
-                existing_emails.add(email.lower())
 
                 # Existiert der User schon (ohne employeeId)? Lokaler Check
                 # gegen den Manifest-Bestand statt API-Probe pro Schüler —
@@ -643,47 +672,57 @@ class M365Plugin(PluginBase):
         """Erkennt SchILD-Emails, die nicht mehr zum Template passen.
 
         Typischer Fall: Klassenwechsel bei Template ``{k}.{n}`` — die
-        Adresse trägt noch die alte Klasse. Die neue Adresse wird gegen
-        alle anderen SchILD-Emails auf Kollision geprüft (M365-Kollisionen
-        fallen erst beim Anwenden im M365-Plugin auf).
+        Adresse trägt noch die alte Klasse. Die neuen Adressen werden als
+        Batch vergeben, damit auch mehrere Schüler mit gleichem Nachnamen
+        in derselben Klasse unterschiedliche Adressen bekommen
+        (M365-Kollisionen fallen erst beim Anwenden auf).
         """
         if not self._domain:
             return []
 
-        all_emails = {(s.get("email") or "").strip().lower() for s in students} - {""}
-
-        suggestions: list[dict] = []
+        # Schritt 1: Abweichungen finden
+        findings: list[tuple[dict, dict]] = []
         for s in students:
             sid = s.get("school_internal_id", "")
-            current = (s.get("email") or "").strip()
-            first = s.get("first_name", "")
-            last = s.get("last_name", "")
             klass = s.get("class_name", "")
             if not sid or not klass:
                 continue
-
             finding = analyze_email(
-                current, first, last, klass, self._domain, self._email_template
-            )
-            if finding is None:
-                continue
-
-            new_email = generate_email(
-                first,
-                last,
+                (s.get("email") or "").strip(),
+                s.get("first_name", ""),
+                s.get("last_name", ""),
+                klass,
                 self._domain,
                 self._email_template,
-                all_emails - {current.lower()},
-                class_name=klass,
             )
+            if finding is not None:
+                findings.append((s, finding))
+
+        if not findings:
+            return []
+
+        # Schritt 2: neue Adressen als Batch vergeben. Die Adressen der zu
+        # korrigierenden Schüler werden frei — alle anderen bleiben belegt.
+        replaced = {(s.get("email") or "").strip().lower() for s, _ in findings}
+        taken = (
+            {(s.get("email") or "").strip().lower() for s in students} - replaced - {""}
+        )
+        assigned = assign_emails(
+            [s for s, _ in findings], self._domain, self._email_template, taken
+        )
+
+        suggestions: list[dict] = []
+        for s, finding in findings:
+            sid = str(s.get("school_internal_id", ""))
+            new_email = assigned.get(sid)
             reason = finding["reason"] if new_email else "collision"
             suggestions.append(
                 {
                     "school_internal_id": sid,
-                    "first_name": first,
-                    "last_name": last,
-                    "class_name": klass,
-                    "old_email": current,
+                    "first_name": s.get("first_name", ""),
+                    "last_name": s.get("last_name", ""),
+                    "class_name": s.get("class_name", ""),
+                    "old_email": (s.get("email") or "").strip(),
                     "email": new_email or "",
                     "reason": reason,
                     "old_class": finding.get("old_class", ""),

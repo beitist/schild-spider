@@ -30,7 +30,7 @@ Desktop-Tool zur automatisierten Synchronisation von Schülerdaten zwischen **Sc
 - **Änderungsvorschau mit Details** — Generierte Email-Adressen und konkrete Unterschiede (Email alt → neu, Klasse alt → neu, Name) werden vor dem Anwenden angezeigt
 - **Klassengruppen** — Automatische Erstellung von SuS- und KuK-Gruppen pro Klasse (M365), Kurs-Sync (Moodle)
 - **Write-Back** — Generierte Email-Adressen werden nach dem Anwenden direkt zum Rückschreiben in die SchILD-DB angeboten (oder automatisch, per Plugin-Option); danach werden die Quelldaten automatisch neu geladen
-- **Email-Korrektur nach Klassenwechsel** — Beim Laden werden SchILD-Emails gegen das Template geprüft (z.B. `{k}.{n}`); veraltete Adressen können per Dialog in SchILD aktualisiert werden, der M365-Sync zieht den UPN danach nach
+- **Email-Korrektur beim Laden** — SchILD-Emails werden gegen das Template geprüft (z.B. `{k}.{n}`). Nach einem Klassenwechsel veraltete Adressen werden sofort im geladenen Datensatz korrigiert, sodass alle Plugins mit der richtigen Adresse arbeiten; mehrdeutige Fälle kommen in einen Auswahl-Dialog
 - **Email-Fallback-Matching** — Bestehende M365-Accounts werden per Email erkannt, auch ohne employeeId
 - **Crash-Diagnostik** — Worker-Logging in `spider.log`, nativer Crash-Traceback via `faulthandler`
 
@@ -174,24 +174,47 @@ Falls Schüler automatisch eine Lizenz erhalten sollen (z.B. A1 for Students), b
 
 Lässt du das Feld leer, erfolgt keine automatische Lizenzzuweisung.
 
-### 6. Verhalten bei Email-Änderung (z.B. Klassenwechsel)
+### 6. Email-Vergabe bei gleichen Nachnamen
 
-Ändert sich die SchILD-Email eines Schülers (etwa weil die Klasse Teil der Adresse ist), bietet **Einstellungen → Microsoft 365 → „Bei Email-Änderung"** zwei Wege:
+Bei einem Template wie `{k}.{n}` (Klasse.Nachname) kollidieren Schüler mit gleichem Nachnamen in derselben Klasse. Schild Spider arbeitet dann eine feste Eskalationskette ab — Beispiel Klasse AAV26S, drei Mal „Nguyen":
+
+| Stufe | Muster | Beispiel |
+|---|---|---|
+| 0 | Template | `aav26s.nguyen@` |
+| 1 | + erster Vorname | `aav26s.nguyen.thi@` |
+| 2 | + erste zwei Vornamen | `aav26s.nguyen.thithuy@` |
+| 3 | + erster Vorname + Zähler | `aav26s.nguyen.thi2@`, `.thi3@` … |
+
+Stufen ohne Datengrundlage werden übersprungen (Stufe 2 entfällt bei nur einem Vornamen). Die Vergabe ist **deterministisch**: Sie richtet sich nach der SchILD-ID, nicht nach der Reihenfolge der Quelldaten — Vorschau und Anwenden liefern dieselben Adressen, und ein erneuter Lauf ändert nichts. Bereits vergebene Adressen (in SchILD wie in Microsoft 365) bleiben immer belegt, ein später hinzukommender Schüler rückt auf die nächste freie Stufe.
+
+Sind alle Stufen erschöpft (mehr als 100 identische Namen in einer Klasse), meldet das Plugin den Schüler als Fehler zur manuellen Vergabe.
+
+### 7. Verhalten bei Email-Änderung (z.B. Klassenwechsel)
+
+Welche Adresse gelten soll, entscheidet bereits die Ladephase und nicht das Plugin. Beim **Quelldaten laden** prüft Schild Spider jede SchILD-Adresse gegen das Template:
+
+| Befund | Was passiert |
+|---|---|
+| Adresse trägt eine **fremde Klasse** (nach Klassenwechsel veraltet) | Wird sofort im geladenen Datensatz korrigiert und zum Rückschreiben nach SchILD vorgemerkt. Alle Plugins arbeiten ab hier mit der neuen Adresse. |
+| Adresse weicht **anders** ab (Namensänderung, manuell vergeben) | Bleibt unangetastet und landet im Auswahl-Dialog zur Entscheidung. |
+| Adresse passt (auch mit Kollisions-Suffix) | Keine Aktion. |
+
+Weil die korrekte Adresse damit schon im Datensatz steht, kann der Sync einen Klassenwechsel weder übersehen noch eine in Microsoft 365 bereits von Hand korrigierte Adresse zurückdrehen. Das Rückschreiben nach SchILD läuft über den Rückschreiben-Button oder automatisch (siehe Optionen); danach werden die Quelldaten neu geladen.
+
+Damit die neue Adresse auch in Microsoft 365 ankommt, stehen unter **Einstellungen → Microsoft 365 → Bei Email-Änderung** zwei Wege zur Wahl:
 
 | Option | Verhalten |
 |---|---|
 | **Adresse ändern** (Standard) | UPN und mailNickname werden am bestehenden Konto umbenannt — Postfach, OneDrive und Gruppen bleiben. Zusätzlich wird versucht, die primäre Mailadresse (`mail`) nachzuziehen; lehnt Exchange das ab, erscheint eine Warnung mit alt → neu zum manuellen Nachziehen. |
 | **Neues Konto anlegen, altes deaktivieren** | Neues Konto mit der neuen Adresse (inkl. Lizenz), danach wird das alte Konto deaktiviert, seine employeeId entfernt und der Anzeigename mit „(alt)" markiert. |
 
-### 7. Weitere Optionen
+### 8. Weitere Optionen
 
 | Option | Wirkung |
 |---|---|
 | **Generierte Emails automatisch nach SchILD zurückschreiben** | Nach dem Anwenden wird ohne Rückfrage zurückgeschrieben. Standard: aus — dann fragt der Abschluss-Dialog nach; bei „Nein" bleibt der Button „Rückschreiben" sichtbar. |
 | **Klassengruppen (SuS) synchronisieren** | Gruppen pro Klasse (SuS + Klassenleitung) berechnen und pflegen. Abschaltbar, z.B. solange die Lehrerdaten in SchILD unvollständig sind. |
 | **Lehrergruppen (KuK) synchronisieren** | Gruppen mit allen Lehrkräften einer Klasse (aus Leistungsdaten + Klassenleitung). Ebenfalls abschaltbar. |
-
-Die Email-Änderung selbst wird in SchILD vorbereitet: Beim Laden der Quelldaten erkennt Schild Spider Adressen, die nicht mehr zum Template passen, und bietet sie über **„Email-Adressen aktualisieren"** zum Rückschreiben an. Danach **Berechnen → Anwenden** im M365-Plugin.
 
 ---
 

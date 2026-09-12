@@ -986,8 +986,16 @@ class MainWindow(QMainWindow):
 
     # --- Email-Korrekturen (Klassenwechsel) ---
 
-    def _on_email_check_ready(self, suggestions: list) -> None:
-        """Empfängt Vorschläge für Email-Korrekturen vom LoadWorker."""
+    def _on_email_check_ready(self, auto_applied: list, suggestions: list) -> None:
+        """Empfängt das Ergebnis der Email-Prüfung vom LoadWorker.
+
+        auto_applied: bereits im Datensatz korrigierte Adressen
+            (Klassenwechsel) — müssen nur noch nach SchILD zurück.
+        suggestions: mehrdeutige Fälle für den Auswahl-Dialog.
+        """
+        if auto_applied:
+            self._on_write_back_ready("", list(auto_applied))
+
         self._email_suggestions = list(suggestions)
         n = len(self._email_suggestions)
         if n:

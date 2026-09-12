@@ -19,8 +19,8 @@ class LoadWorker(QObject):
     finished = Signal(list, list)  # (students, teachers)
     error = Signal(str)
     log_signal = Signal(str)
-    # Vorschläge für Email-Korrekturen in SchILD (z.B. nach Klassenwechsel)
-    email_check_ready = Signal(list)
+    # Email-Korrekturen: (automatisch gesetzt, manuell zu entscheiden)
+    email_check_ready = Signal(list, list)
 
     def __init__(self, settings: dict) -> None:
         super().__init__()
@@ -31,12 +31,24 @@ class LoadWorker(QObject):
         log.info(msg)
         self.log_signal.emit(msg)
 
-    def _check_emails(self, all_students: list, visible_students: list) -> list[dict]:
-        """Lässt aktive Plugins die SchILD-Emails gegen ihr Schema prüfen.
+    def _check_emails(
+        self, all_students: list, visible_students: list
+    ) -> tuple[list[dict], list[dict]]:
+        """Prüft die SchILD-Emails gegen das Schema der aktiven Plugins.
+
+        Eindeutig veraltete Adressen (sie tragen noch die alte Klasse)
+        werden SOFORT im geladenen Datensatz korrigiert. Damit arbeiten
+        alle Plugins ab hier mit der richtigen Adresse: Der Klassenwechsel
+        kann weder übersehen werden, noch kann ein Plugin eine bereits
+        korrigierte Adresse im Zielsystem wieder überschreiben.
+
+        Mehrdeutige Fälle (Namensänderung, manuell vergebene Adresse)
+        werden NICHT angefasst — die entscheidet der Anwender im Dialog.
 
         Kollisionen werden über ALLE Schüler geprüft (auch bei aktivem
-        Klassenfilter), angezeigt werden nur Vorschläge für sichtbare.
-        Reine Berechnung — keine API-Zugriffe.
+        Klassenfilter). Reine Berechnung — keine API-Zugriffe.
+
+        Returns: (automatisch gesetzt, manuell zu entscheiden)
         """
         from dataclasses import asdict
 
@@ -44,14 +56,16 @@ class LoadWorker(QObject):
             plugins = load_plugins(self.settings)
         except Exception as exc:
             self._emit(f"⚠ Email-Prüfung übersprungen: {exc}")
-            return []
+            return [], []
         if not plugins:
-            return []
+            return [], []
 
         all_dicts = [asdict(s) for s in all_students]
-        visible_ids = {s.school_internal_id for s in visible_students}
+        by_id = {s.school_internal_id: s for s in visible_students}
         seen: set[str] = set()
-        suggestions: list[dict] = []
+        auto: list[dict] = []
+        manual: list[dict] = []
+
         for name, plugin in plugins:
             try:
                 found = plugin.check_source_emails(all_dicts)
@@ -60,10 +74,20 @@ class LoadWorker(QObject):
                 continue
             for item in found:
                 sid = item.get("school_internal_id", "")
-                if sid in visible_ids and sid not in seen:
-                    seen.add(sid)
-                    suggestions.append(item)
-        return suggestions
+                record = by_id.get(sid)
+                if record is None or sid in seen:
+                    continue
+                seen.add(sid)
+
+                # Klassenwechsel ist eindeutig: die Adresse trägt eine
+                # fremde Klasse, das ist nie Absicht → direkt korrigieren.
+                if item.get("reason") == "class_change" and item.get("email"):
+                    record.email = item["email"]
+                    auto.append(item)
+                else:
+                    manual.append(item)
+
+        return auto, manual
 
     @Slot()
     def run(self) -> None:
@@ -124,30 +148,35 @@ class LoadWorker(QObject):
                 else:
                     self._emit("Keine Lehrerdaten (Quelle nicht konfiguriert).")
 
-                # Email-Schema-Prüfung (z.B. Klassenwechsel → Adresse in
-                # SchILD veraltet). Ergebnis geht an den Button
-                # "Email-Adressen aktualisieren" im Hauptfenster.
-                suggestions = self._check_emails(all_students, students)
-                if suggestions:
-                    n_class = sum(
-                        1 for s in suggestions if s.get("reason") == "class_change"
-                    )
-                    n_other = len(suggestions) - n_class
-                    parts = []
-                    if n_class:
-                        parts.append(f"{n_class} nach Klassenwechsel")
-                    if n_other:
-                        parts.append(f"{n_other} sonstige Abweichungen")
+                # Email-Schema-Prüfung: veraltete Adressen nach Klassenwechsel
+                # werden direkt im Datensatz korrigiert, mehrdeutige Fälle
+                # gehen an den Button "Email-Adressen aktualisieren".
+                auto_emails, manual_emails = self._check_emails(all_students, students)
+                if auto_emails:
                     self._emit(
-                        f"⚠ {len(suggestions)} Email-Adressen passen nicht mehr "
-                        f"zum Schema ({', '.join(parts)}) → "
-                        f"Button 'Email-Adressen aktualisieren'"
+                        f"✎ {len(auto_emails)} Email-Adressen an die neue Klasse "
+                        f"angepasst — Rückschreiben nach SchILD steht noch aus."
+                    )
+                    for item in auto_emails[:20]:
+                        self._emit(
+                            f"    {item.get('class_name', '')}: "
+                            f"{item.get('last_name', '')}, "
+                            f"{item.get('first_name', '')}: "
+                            f"{item.get('old_email', '')} → {item.get('email', '')}"
+                        )
+                    if len(auto_emails) > 20:
+                        self._emit(f"    ... und {len(auto_emails) - 20} weitere")
+                if manual_emails:
+                    self._emit(
+                        f"⚠ {len(manual_emails)} Email-Adressen weichen vom Schema ab "
+                        f"(z.B. Namensänderung) → Button "
+                        f"'Email-Adressen aktualisieren'"
                     )
 
                 for w in caught:
                     self._emit(f"⚠ {w.message}")
 
-            self.email_check_ready.emit(suggestions)
+            self.email_check_ready.emit(auto_emails, manual_emails)
             self.finished.emit(students, teachers)
 
         except Exception as exc:

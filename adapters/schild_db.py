@@ -254,6 +254,10 @@ class SchildDbAdapter(AdapterBase):
             ) from exc
 
         return pymysql.connect(
+            # FOUND_ROWS: cursor.rowcount zählt GEFUNDENE statt geänderter
+            # Zeilen. Nur so bedeutet rowcount == 0 beim Write-back
+            # eindeutig "ID nicht gefunden" und nicht "Wert war schon gleich".
+            client_flag=pymysql.constants.CLIENT.FOUND_ROWS,
             host=self.db_host,
             port=int(self.db_port),
             database=self.db_name,
@@ -551,8 +555,34 @@ class SchildDbAdapter(AdapterBase):
         for update in updates:
             sid = update.get("school_internal_id", "")
             try:
-                if "email" in update:
-                    cursor.execute(_SQL_WRITE_BACK_EMAIL, (update["email"], sid))
+                email = (update.get("email") or "").strip()
+                if not email:
+                    results.append(
+                        {
+                            "school_internal_id": sid,
+                            "success": False,
+                            "message": "Keine Email im Update — übersprungen",
+                        }
+                    )
+                    continue
+
+                cursor.execute(_SQL_WRITE_BACK_EMAIL, (email, sid))
+                # Ohne diese Prüfung meldet ein ins Leere laufendes UPDATE
+                # (ID existiert nicht) stillen Erfolg — die Adresse wäre
+                # nie in SchILD gelandet, ohne dass es jemand merkt.
+                if cursor.rowcount == 0:
+                    results.append(
+                        {
+                            "school_internal_id": sid,
+                            "success": False,
+                            "message": (
+                                f"Kein Schüler mit ID {sid} in der Tabelle "
+                                f"'schueler' gefunden — nicht gespeichert"
+                            ),
+                        }
+                    )
+                    continue
+
                 results.append(
                     {"school_internal_id": sid, "success": True, "message": ""}
                 )
