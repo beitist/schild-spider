@@ -197,7 +197,20 @@ Welche Adresse gelten soll, entscheidet bereits die Ladephase und nicht das Plug
 |---|---|
 | Adresse trägt eine **fremde Klasse** (nach Klassenwechsel veraltet) | Wird sofort im geladenen Datensatz korrigiert und zum Rückschreiben nach SchILD vorgemerkt. Alle Plugins arbeiten ab hier mit der neuen Adresse. |
 | Adresse weicht **anders** ab (Namensänderung, manuell vergeben) | Bleibt unangetastet und landet im Auswahl-Dialog zur Entscheidung. |
+| Adresse ist **doppelt vergeben** (zwei Schüler, dieselbe Adresse) | Die niedrigste SchILD-ID behält sie, für die übrigen gibt es einen Vorschlag im Auswahl-Dialog. Nie automatisch, weil erst Microsoft 365 weiß, welchem Konto die Adresse wirklich gehört. |
 | Adresse passt (auch mit Kollisions-Suffix) | Keine Aktion. |
+
+Die Prüfung läuft bei **jedem** Laden und schreibt immer eine Zusammenfassung ins Log, auch wenn alles passt, zum Beispiel:
+
+```
+Email-Prüfung (Microsoft 365, Schema {k}.{n}@kkbkha.de): 1412 Schüler geprüft
+  ✓ 1380 passen
+  ✎ 3 an die neue Klasse angepasst
+  ⚠ 1 doppelt vergeben
+  · 28 ohne Email (vergibt das Plugin beim Anlegen)
+```
+
+Ist kein Plugin mit Email-Schema aktiv (Microsoft 365 aus oder ohne Domain), steht dort ein entsprechender Hinweis.
 
 Weil die korrekte Adresse damit schon im Datensatz steht, kann der Sync einen Klassenwechsel weder übersehen noch eine in Microsoft 365 bereits von Hand korrigierte Adresse zurückdrehen. Das Rückschreiben nach SchILD läuft über den Rückschreiben-Button oder automatisch (siehe Optionen); danach werden die Quelldaten neu geladen.
 

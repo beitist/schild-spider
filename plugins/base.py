@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from core.email_generator import check_emails
 from core.models import ChangeSet, ConfigField, StudentRecord, TeacherRecord
 
 # Status-Werte, die ein Zielsystem statt eines booleschen "success" liefern kann.
@@ -164,19 +165,26 @@ class PluginBase(ABC):
         """
         return []
 
-    def check_source_emails(self, students: list[dict]) -> list[dict]:
-        """Prüft, ob die Quell-Emails (SchILD) noch zum Schema des Plugins passen.
+    def email_scheme(self) -> tuple[str, str] | None:
+        """Email-Schema des Plugins als (Domain, Template), sonst None.
 
-        Wird direkt nach dem Laden der Quelldaten aufgerufen — reine
-        Berechnung, keine API-Zugriffe. Plugins, die Emails nach einem
-        Template erzeugen (z.B. M365 mit ``{k}.{n}``), erkennen so
-        Klassenwechsel, bei denen die Adresse in SchILD nachgezogen werden muss.
-
-        Returns: [{school_internal_id, first_name, last_name, class_name,
-                   old_email, email (neu), reason, old_class, checked}]
-        Standard: keine Vorschläge.
+        Plugins, die Adressen nach einem Template vergeben (z.B. M365 mit
+        ``{k}.{n}``), melden es hier. Die Ladephase prüft damit bei jedem
+        Laden alle Quell-Emails (siehe ``core.email_generator.check_emails``).
+        Standard: kein Schema.
         """
-        return []
+        return None
+
+    def check_source_emails(self, students: list[dict]) -> list[dict]:
+        """Vorschläge für Email-Korrekturen in der Quelle (reine Berechnung).
+
+        Nutzt ``email_scheme()``; Plugins müssen diese Methode in der
+        Regel nicht überschreiben.
+        """
+        scheme = self.email_scheme()
+        if scheme is None:
+            return []
+        return check_emails(students, *scheme)["findings"]
 
     def get_write_back_data(self) -> list[dict]:
         """Gibt Daten zurück die an den Adapter zurückgeschrieben werden sollen.

@@ -10,7 +10,7 @@ import string
 import time
 import warnings
 
-from core.email_generator import analyze_email, assign_emails
+from core.email_generator import assign_emails
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
 from core.plugin_loader import as_bool
@@ -668,71 +668,11 @@ class M365Plugin(PluginBase):
     def get_write_back_data(self) -> list[dict]:
         return list(self._generated_emails)
 
-    def check_source_emails(self, students: list[dict]) -> list[dict]:
-        """Erkennt SchILD-Emails, die nicht mehr zum Template passen.
-
-        Typischer Fall: Klassenwechsel bei Template ``{k}.{n}`` — die
-        Adresse trägt noch die alte Klasse. Die neuen Adressen werden als
-        Batch vergeben, damit auch mehrere Schüler mit gleichem Nachnamen
-        in derselben Klasse unterschiedliche Adressen bekommen
-        (M365-Kollisionen fallen erst beim Anwenden auf).
-        """
+    def email_scheme(self) -> tuple[str, str] | None:
+        """Domain und Template für die Email-Prüfung beim Laden."""
         if not self._domain:
-            return []
-
-        # Schritt 1: Abweichungen finden
-        findings: list[tuple[dict, dict]] = []
-        for s in students:
-            sid = s.get("school_internal_id", "")
-            klass = s.get("class_name", "")
-            if not sid or not klass:
-                continue
-            finding = analyze_email(
-                (s.get("email") or "").strip(),
-                s.get("first_name", ""),
-                s.get("last_name", ""),
-                klass,
-                self._domain,
-                self._email_template,
-            )
-            if finding is not None:
-                findings.append((s, finding))
-
-        if not findings:
-            return []
-
-        # Schritt 2: neue Adressen als Batch vergeben. Die Adressen der zu
-        # korrigierenden Schüler werden frei — alle anderen bleiben belegt.
-        replaced = {(s.get("email") or "").strip().lower() for s, _ in findings}
-        taken = (
-            {(s.get("email") or "").strip().lower() for s in students} - replaced - {""}
-        )
-        assigned = assign_emails(
-            [s for s, _ in findings], self._domain, self._email_template, taken
-        )
-
-        suggestions: list[dict] = []
-        for s, finding in findings:
-            sid = str(s.get("school_internal_id", ""))
-            new_email = assigned.get(sid)
-            reason = finding["reason"] if new_email else "collision"
-            suggestions.append(
-                {
-                    "school_internal_id": sid,
-                    "first_name": s.get("first_name", ""),
-                    "last_name": s.get("last_name", ""),
-                    "class_name": s.get("class_name", ""),
-                    "old_email": (s.get("email") or "").strip(),
-                    "email": new_email or "",
-                    "reason": reason,
-                    "old_class": finding.get("old_class", ""),
-                    # Klassenwechsel sind eindeutig → vorausgewählt;
-                    # sonstige Abweichungen (Namensänderung, manuelle
-                    # Adresse) entscheidet der User bewusst.
-                    "checked": reason == "class_change",
-                }
-            )
-        return suggestions
+            return None
+        return self._domain, self._email_template
 
     # --- Gruppen-Hilfsmethoden ---
 

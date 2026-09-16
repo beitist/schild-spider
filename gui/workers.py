@@ -34,60 +34,141 @@ class LoadWorker(QObject):
     def _check_emails(
         self, all_students: list, visible_students: list
     ) -> tuple[list[dict], list[dict]]:
-        """Prüft die SchILD-Emails gegen das Schema der aktiven Plugins.
+        """Prüft bei jedem Laden ALLE Quell-Emails und meldet das Ergebnis.
 
-        Eindeutig veraltete Adressen (sie tragen noch die alte Klasse)
-        werden SOFORT im geladenen Datensatz korrigiert. Damit arbeiten
-        alle Plugins ab hier mit der richtigen Adresse: Der Klassenwechsel
-        kann weder übersehen werden, noch kann ein Plugin eine bereits
-        korrigierte Adresse im Zielsystem wieder überschreiben.
+        Das Schema (Domain + Template) liefert das erste aktive Plugin, das
+        eines hat (in der Praxis Microsoft 365). Geprüft wird gegen das
+        Schema und auf doppelt vergebene Adressen.
 
-        Mehrdeutige Fälle (Namensänderung, manuell vergebene Adresse)
-        werden NICHT angefasst — die entscheidet der Anwender im Dialog.
+        Eindeutig veraltete Adressen (fremde Klasse nach Klassenwechsel)
+        werden SOFORT im geladenen Datensatz korrigiert — alle Plugins
+        arbeiten ab hier mit der richtigen Adresse. Alles Mehrdeutige
+        (Namensänderung, Dublette) bleibt unangetastet und geht an den
+        Auswahl-Dialog. Die Zusammenfassung erscheint immer, auch wenn
+        alles passt, damit sichtbar ist, dass geprüft wurde.
 
         Kollisionen werden über ALLE Schüler geprüft (auch bei aktivem
-        Klassenfilter). Reine Berechnung — keine API-Zugriffe.
+        Klassenfilter), gezählt und korrigiert nur die sichtbaren.
+        Reine Berechnung — keine API-Zugriffe.
 
         Returns: (automatisch gesetzt, manuell zu entscheiden)
         """
+        from collections import Counter
         from dataclasses import asdict
+
+        from core import email_generator as eg
 
         try:
             plugins = load_plugins(self.settings)
         except Exception as exc:
             self._emit(f"⚠ Email-Prüfung übersprungen: {exc}")
             return [], []
-        if not plugins:
-            return [], []
 
-        all_dicts = [asdict(s) for s in all_students]
+        # Anzeigename statt Registry-Schlüssel ("Microsoft 365" statt "m365")
+        owner = next(
+            (
+                (p.plugin_name(), p.email_scheme())
+                for _, p in plugins
+                if p.email_scheme()
+            ),
+            None,
+        )
+        if owner is None:
+            self._emit(
+                "ℹ Email-Prüfung übersprungen: kein aktives Plugin mit "
+                "Email-Schema (z.B. Microsoft 365 deaktiviert oder ohne Domain)."
+            )
+            return [], []
+        plugin_name, (domain, template) = owner
+
+        result = eg.check_emails([asdict(s) for s in all_students], domain, template)
         by_id = {s.school_internal_id: s for s in visible_students}
-        seen: set[str] = set()
+
         auto: list[dict] = []
         manual: list[dict] = []
-
-        for name, plugin in plugins:
-            try:
-                found = plugin.check_source_emails(all_dicts)
-            except Exception as exc:
-                self._emit(f"⚠ Email-Prüfung ({name}) fehlgeschlagen: {exc}")
+        for item in result["findings"]:
+            record = by_id.get(item.get("school_internal_id", ""))
+            if record is None:
                 continue
-            for item in found:
-                sid = item.get("school_internal_id", "")
-                record = by_id.get(sid)
-                if record is None or sid in seen:
-                    continue
-                seen.add(sid)
+            # Klassenwechsel ist eindeutig: die Adresse trägt eine fremde
+            # Klasse, das ist nie Absicht → direkt korrigieren.
+            if item.get("reason") == eg.EMAIL_CLASS_CHANGE and item.get("email"):
+                record.email = item["email"]
+                auto.append(item)
+            else:
+                manual.append(item)
 
-                # Klassenwechsel ist eindeutig: die Adresse trägt eine
-                # fremde Klasse, das ist nie Absicht → direkt korrigieren.
-                if item.get("reason") == "class_change" and item.get("email"):
-                    record.email = item["email"]
-                    auto.append(item)
-                else:
-                    manual.append(item)
-
+        counts = Counter(
+            result["status"][sid] for sid in by_id if sid in result["status"]
+        )
+        self._emit_email_summary(
+            plugin_name, domain, template, counts, auto, manual, eg
+        )
         return auto, manual
+
+    def _emit_email_summary(
+        self,
+        plugin_name: str,
+        domain: str,
+        template: str,
+        counts,
+        auto: list[dict],
+        manual: list[dict],
+        eg,
+    ) -> None:
+        """Schreibt die Zusammenfassung der Email-Prüfung ins Log."""
+        total = sum(counts.values())
+        self._emit(
+            f"Email-Prüfung ({plugin_name}, Schema {template}@{domain}): "
+            f"{total} Schüler geprüft"
+        )
+        zeilen = [
+            (eg.EMAIL_OK, "✓", "passen"),
+            (eg.EMAIL_CLASS_CHANGE, "✎", "an die neue Klasse angepasst"),
+            (eg.EMAIL_DUPLICATE, "⚠", "doppelt vergeben"),
+            (eg.EMAIL_MISMATCH, "⚠", "weichen vom Schema ab"),
+            (eg.EMAIL_COLLISION, "⚠", "ohne freie Adresse (manuell vergeben)"),
+            (eg.EMAIL_EMPTY, "·", "ohne Email (vergibt das Plugin beim Anlegen)"),
+            (eg.EMAIL_FOREIGN, "·", "mit fremder Domain (nicht angefasst)"),
+        ]
+        for key, symbol, text in zeilen:
+            if counts.get(key) or key == eg.EMAIL_OK:
+                self._emit(f"  {symbol} {counts.get(key, 0)} {text}")
+
+        def _person(item: dict) -> str:
+            return (
+                f"{item.get('class_name', '')}: {item.get('last_name', '')}, "
+                f"{item.get('first_name', '')}"
+            )
+
+        if auto:
+            self._emit("  Angepasst (Rückschreiben nach SchILD steht noch aus):")
+            for item in auto[:20]:
+                self._emit(
+                    f"    {_person(item)}: "
+                    f"{item.get('old_email', '')} → {item.get('email', '')}"
+                )
+            if len(auto) > 20:
+                self._emit(f"    ... und {len(auto) - 20} weitere")
+
+        duplicates = [m for m in manual if m.get("reason") == eg.EMAIL_DUPLICATE]
+        if duplicates:
+            # Dubletten scheitern sonst beim Sync mit "already exists" —
+            # deshalb alle einzeln nennen, nicht gekürzt.
+            self._emit("  Doppelt vergeben (niedrigste SchILD-ID behält die Adresse):")
+            for item in duplicates:
+                self._emit(
+                    f"    {_person(item)} (ID {item.get('school_internal_id', '')}): "
+                    f"{item.get('old_email', '')} → Vorschlag "
+                    f"{item.get('email', '') or '—'}"
+                )
+
+        if manual:
+            faelle = "Fall" if len(manual) == 1 else "Fälle"
+            self._emit(
+                f"  → {len(manual)} {faelle} zur Entscheidung: "
+                f"Button 'Email-Adressen aktualisieren'"
+            )
 
     @Slot()
     def run(self) -> None:
@@ -148,30 +229,9 @@ class LoadWorker(QObject):
                 else:
                     self._emit("Keine Lehrerdaten (Quelle nicht konfiguriert).")
 
-                # Email-Schema-Prüfung: veraltete Adressen nach Klassenwechsel
-                # werden direkt im Datensatz korrigiert, mehrdeutige Fälle
-                # gehen an den Button "Email-Adressen aktualisieren".
+                # Email-Prüfung bei jedem Laden: veraltete Adressen werden
+                # direkt korrigiert, mehrdeutige Fälle gehen an den Dialog.
                 auto_emails, manual_emails = self._check_emails(all_students, students)
-                if auto_emails:
-                    self._emit(
-                        f"✎ {len(auto_emails)} Email-Adressen an die neue Klasse "
-                        f"angepasst — Rückschreiben nach SchILD steht noch aus."
-                    )
-                    for item in auto_emails[:20]:
-                        self._emit(
-                            f"    {item.get('class_name', '')}: "
-                            f"{item.get('last_name', '')}, "
-                            f"{item.get('first_name', '')}: "
-                            f"{item.get('old_email', '')} → {item.get('email', '')}"
-                        )
-                    if len(auto_emails) > 20:
-                        self._emit(f"    ... und {len(auto_emails) - 20} weitere")
-                if manual_emails:
-                    self._emit(
-                        f"⚠ {len(manual_emails)} Email-Adressen weichen vom Schema ab "
-                        f"(z.B. Namensänderung) → Button "
-                        f"'Email-Adressen aktualisieren'"
-                    )
 
                 for w in caught:
                     self._emit(f"⚠ {w.message}")

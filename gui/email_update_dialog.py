@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 _REASON_TEXT: dict[str, str] = {
     "class_change": "Klassenwechsel",
+    "duplicate": "Adresse doppelt vergeben",
     "mismatch": "Name/Schema abweichend",
     "collision": "Kollision — manuell vergeben",
 }
@@ -64,7 +65,7 @@ class EmailUpdateDialog(QDialog):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
 
         # Klassenwechsel zuerst, dann sonstige, Kollisionen zuletzt
-        order = {"class_change": 0, "mismatch": 1, "collision": 2}
+        order = {"class_change": 0, "duplicate": 1, "mismatch": 2, "collision": 3}
         for s in sorted(
             self._suggestions,
             key=lambda x: (order.get(x.get("reason", ""), 9), x.get("last_name", "")),

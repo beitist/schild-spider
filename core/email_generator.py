@@ -290,3 +290,124 @@ def analyze_email(
     if old_k and old_k != k:
         return {"reason": "class_change", "old_class": old_k}
     return {"reason": "mismatch", "old_class": ""}
+
+
+# ---------------------------------------------------------------------------
+# Prüfung aller Quell-Emails (läuft bei jedem Laden der Quelldaten)
+# ---------------------------------------------------------------------------
+
+# Befunde ohne Handlungsbedarf
+EMAIL_OK = "ok"
+EMAIL_EMPTY = "empty"  # vergibt das Plugin beim Anlegen
+EMAIL_FOREIGN = "foreign"  # andere Domain, wird nicht angefasst
+# Befunde mit Handlungsbedarf (erscheinen in "findings")
+EMAIL_CLASS_CHANGE = "class_change"
+EMAIL_MISMATCH = "mismatch"
+EMAIL_DUPLICATE = "duplicate"
+EMAIL_COLLISION = "collision"
+
+
+def check_emails(students: list[dict], domain: str, template: str = "{v}.{n}") -> dict:
+    """Prüft ALLE Quell-Emails gegen das Schema und auf Dubletten.
+
+    Jeder Schüler (mit ID und Klasse) bekommt genau einen Status:
+
+        ok            passt zum Schema (auch mit Kollisions-Suffix)
+        empty         keine Adresse — vergibt das Plugin beim Anlegen
+        foreign       andere Domain — wird nicht angefasst
+        class_change  trägt eine fremde Klasse (nach Klassenwechsel)
+        mismatch      weicht anders ab (Namensänderung, manuell vergeben)
+        duplicate     dieselbe Adresse hat schon ein anderer Schüler
+        collision     braucht eine neue Adresse, aber alle Stufen belegt
+
+    Bei Dubletten behält die niedrigste SchILD-ID die Adresse (gleiche
+    Regel wie bei ``assign_emails``), alle anderen bekommen einen
+    Vorschlag. Welches Konto in Microsoft 365 die Adresse wirklich
+    besitzt, weiß die Ladephase nicht — deshalb werden Dubletten nie
+    automatisch korrigiert, sondern nur vorgeschlagen.
+
+    Returns:
+        {"status": {sid: status}, "findings": [vorschlag, ...]}
+        Vorschläge haben die Felder school_internal_id, first_name,
+        last_name, class_name, old_email, email, reason, old_class, checked.
+    """
+    own_domain = domain.strip().lower()
+    status: dict[str, str] = {}
+    pending: list[tuple[dict, str, str]] = []  # (schüler, grund, alte klasse)
+    ok_by_email: dict[str, list[dict]] = {}
+
+    for s in students:
+        sid = str(s.get("school_internal_id", "")).strip()
+        klass = s.get("class_name", "")
+        if not sid or not klass:
+            continue
+
+        current = (s.get("email") or "").strip()
+        if not current:
+            status[sid] = EMAIL_EMPTY
+            continue
+        if current.lower().rpartition("@")[2] != own_domain:
+            status[sid] = EMAIL_FOREIGN
+            continue
+
+        finding = analyze_email(
+            current,
+            s.get("first_name", ""),
+            s.get("last_name", ""),
+            klass,
+            domain,
+            template,
+        )
+        if finding is None:
+            status[sid] = EMAIL_OK
+            ok_by_email.setdefault(current.lower(), []).append(s)
+        else:
+            status[sid] = finding["reason"]
+            pending.append((s, finding["reason"], finding.get("old_class", "")))
+
+    # Dubletten unter den schemakonformen Adressen: jede für sich passt,
+    # aber zwei Konten können nicht dieselbe Adresse haben.
+    for group in ok_by_email.values():
+        if len(group) < 2:
+            continue
+        for s in sorted(group, key=_student_sort_key)[1:]:
+            status[str(s.get("school_internal_id", "")).strip()] = EMAIL_DUPLICATE
+            pending.append((s, EMAIL_DUPLICATE, ""))
+
+    if not pending:
+        return {"status": status, "findings": []}
+
+    # Belegt bleibt jede Adresse eines Schülers, der sie BEHÄLT. Nicht über
+    # "alle minus ersetzte" rechnen: Teilen sich ein veralteter und ein
+    # gültiger Schüler eine Adresse, würde sie sonst fälschlich frei.
+    changing = {str(s.get("school_internal_id", "")).strip() for s, _, _ in pending}
+    taken = {
+        (s.get("email") or "").strip().lower()
+        for s in students
+        if str(s.get("school_internal_id", "")).strip() not in changing
+    } - {""}
+    assigned = assign_emails([s for s, _, _ in pending], domain, template, taken)
+
+    findings: list[dict] = []
+    for s, reason, old_class in pending:
+        sid = str(s.get("school_internal_id", "")).strip()
+        new_email = assigned.get(sid)
+        if not new_email:
+            reason = EMAIL_COLLISION
+            status[sid] = EMAIL_COLLISION
+        findings.append(
+            {
+                "school_internal_id": sid,
+                "first_name": s.get("first_name", ""),
+                "last_name": s.get("last_name", ""),
+                "class_name": s.get("class_name", ""),
+                "old_email": (s.get("email") or "").strip(),
+                "email": new_email or "",
+                "reason": reason,
+                "old_class": old_class,
+                # Nur Klassenwechsel sind eindeutig — alles andere
+                # entscheidet der Anwender bewusst.
+                "checked": reason == EMAIL_CLASS_CHANGE,
+            }
+        )
+    return {"status": status, "findings": findings}
