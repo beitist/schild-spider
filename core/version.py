@@ -8,7 +8,7 @@ entstünde ein Import-Zirkel (main importiert die GUI).
 from __future__ import annotations
 
 APP_NAME = "Schild Spider"
-APP_VERSION = "0.7.7-dev"
+APP_VERSION = "0.7.7"
 APP_COPYRIGHT = "© 2025–2026"
 APP_LICENSE = "GPL v3"
 
