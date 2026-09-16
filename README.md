@@ -198,7 +198,7 @@ Für **Klassennamen** ist das getrennt einstellbar, weil Klassenkürzel oft tech
 | ausschreiben (Standard) | `bkoe26a` |
 | nur Punkte weglassen | `bko26a` |
 
-Personennamen folgen immer der deutschen Regel, unabhängig von dieser Einstellung. Passt die Einstellung nicht zum Bestand, hält die Prüfung jede betroffene Adresse für einen Klassenwechsel und korrigiert sie automatisch. Vor dem ersten Lauf also prüfen, wie eure vorhandenen Adressen geschrieben sind.
+Die Einstellung gilt auch für die **Gruppennamen** (`{k}_sus`, `{k}_kuk`), damit Gruppe und Adresse zusammenpassen. Personennamen folgen immer der deutschen Regel, unabhängig von dieser Einstellung. Passt die Einstellung nicht zum Bestand, hält die Prüfung jede betroffene Adresse für einen Klassenwechsel und korrigiert sie automatisch. Vor dem ersten Lauf also prüfen, wie eure vorhandenen Adressen geschrieben sind.
 
 ### 7. Verhalten bei Email-Änderung (z.B. Klassenwechsel)
 

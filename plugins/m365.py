@@ -15,6 +15,7 @@ from core.email_generator import (
     CLASS_UMLAUT_STRIP,
     EmailScheme,
     assign_emails,
+    transliterate_class,
 )
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
@@ -716,7 +717,7 @@ class M365Plugin(PluginBase):
         if cache_key in cache:
             return cache[cache_key]
 
-        sanitized = _sanitize_nickname(class_name)
+        sanitized = _sanitize_nickname(class_name, self._class_umlauts)
         nickname = template.replace("{k}", sanitized)
         display_name = nickname  # z.B. "10a_sus"
 
@@ -797,7 +798,7 @@ class M365Plugin(PluginBase):
             return None, True
 
         # Fallback: einzelne Abfrage (nur wenn kein Bulk-Load)
-        sanitized = _sanitize_nickname(class_name)
+        sanitized = _sanitize_nickname(class_name, self._class_umlauts)
         display_name = template.replace("{k}", sanitized)
 
         found = self._graph.find_group_by_name(display_name)
@@ -856,7 +857,7 @@ class M365Plugin(PluginBase):
 
         # SuS- und KuK-Caches vorbelegen
         for class_name in class_names:
-            sanitized = _sanitize_nickname(class_name)
+            sanitized = _sanitize_nickname(class_name, self._class_umlauts)
 
             sus_name = self._group_sus_template.replace("{k}", sanitized)
             gid = name_to_id.get(sus_name.lower())
@@ -1003,7 +1004,7 @@ class M365Plugin(PluginBase):
         """Berechnet Diff für eine SuS-Gruppe (ohne auszuführen)."""
         changes: list[dict] = []
         group_name = self._group_sus_template.replace(
-            "{k}", _sanitize_nickname(class_name)
+            "{k}", _sanitize_nickname(class_name, self._class_umlauts)
         )
         group_id, is_new = self._find_group(
             class_name, self._group_sus_template, self._sus_cache
@@ -1089,7 +1090,7 @@ class M365Plugin(PluginBase):
         """Berechnet Diff für eine KuK-Gruppe (ohne auszuführen)."""
         changes: list[dict] = []
         group_name = self._group_kuk_template.replace(
-            "{k}", _sanitize_nickname(class_name)
+            "{k}", _sanitize_nickname(class_name, self._class_umlauts)
         )
         group_id, is_new = self._find_group(
             class_name, self._group_kuk_template, self._kuk_cache
@@ -1459,9 +1460,15 @@ class M365Plugin(PluginBase):
             )
 
 
-def _sanitize_nickname(text: str) -> str:
-    """Bereinigt einen Klassennamen für mailNickname (a-z, 0-9, -, _)."""
-    return re.sub(r"[^a-z0-9_\-]", "", text.lower())
+def _sanitize_nickname(text: str, class_umlauts: str = CLASS_UMLAUT_EXPAND) -> str:
+    """Bereinigt einen Klassennamen für mailNickname (a-z, 0-9, -, _).
+
+    Nutzt dieselbe Umlaut-Regel wie der Adressteil, damit Gruppenname und
+    Email-Adresse zusammenpassen. Zuvor fiel ein Umlaut hier ersatzlos
+    weg: aus BKÖ26A wurde die Gruppe bk26a statt bkoe26a bzw. bko26a.
+    """
+    umgesetzt = transliterate_class(text, class_umlauts).lower()
+    return re.sub(r"[^a-z0-9_\-]", "", umgesetzt)
 
 
 def _extract_template_parts(template: str) -> tuple[str, str]:

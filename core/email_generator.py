@@ -104,11 +104,24 @@ CLASS_UMLAUT_EXPAND = "expand"  # BKÖ26A → bkoe26a
 CLASS_UMLAUT_STRIP = "strip"  # BKÖ26A → bko26a
 
 
-def _class_key(class_name: str, class_umlauts: str) -> str:
-    """Setzt einen Klassennamen für den Adressteil um."""
+def transliterate_class(
+    class_name: str, class_umlauts: str = CLASS_UMLAUT_EXPAND
+) -> str:
+    """Setzt einen Klassennamen nach der gewählten Regel um (noch ungefiltert).
+
+    Getrennt von :func:`transliterate`, weil Klassenkürzel und
+    Personennamen unterschiedlichen Regeln folgen dürfen. Die Filterung
+    auf erlaubte Zeichen macht der Aufrufer, weil Adressteil und
+    Gruppenname verschiedene Zeichen zulassen.
+    """
     if class_umlauts == CLASS_UMLAUT_STRIP:
-        return _sanitize(_strip_diacritics(class_name))
-    return _sanitize(transliterate(class_name))
+        return _strip_diacritics(class_name)
+    return transliterate(class_name)
+
+
+def _class_key(class_name: str, class_umlauts: str) -> str:
+    """Klassenname für den Adressteil (nur a-z, 0-9, Punkt, Bindestrich)."""
+    return _sanitize(transliterate_class(class_name, class_umlauts))
 
 
 def _strip_diacritics(text: str) -> str:
