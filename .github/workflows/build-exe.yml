@@ -2,7 +2,11 @@ name: Build Windows EXE
 
 on:
   push:
-    tags: ['v*']   # Triggert bei Tags wie v0.1, v0.1.0, v1.2.3-beta, etc.
+    tags: ['v*']   # Release-Build bei Tags wie v0.7.6
+  # Test-Build OHNE Release: auf GitHub unter Actions → "Build Windows EXE"
+  # → "Run workflow". Die EXE hängt danach als Artifact am Lauf und kann
+  # vorab geprüft werden (z.B. ob Microsoft Defender ruhig bleibt).
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,17 +16,32 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions sind auf Commit-Hashes festgelegt statt auf Tags wie @v4.
+      # Ein Tag lässt sich nachträglich auf anderen Code umhängen, ein Hash
+      # nicht. Das schützt den Build gegen eine manipulierte Action.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
+      # Build-Werkzeuge mit fester Version aus requirements-build.txt.
+      # Ein unbemerktes PyInstaller-Update hat in v0.7.6 den Startcode der
+      # EXE geändert und einen Defender-Fehlalarm ausgelöst.
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements.txt -r requirements-build.txt
+
+      # Hersteller, Produktname und Version aus core/version.py in die
+      # Datei-Eigenschaften der EXE. Programme ohne diese Angaben bewerten
+      # Virenscanner-Heuristiken misstrauischer.
+      - name: Generate version info
+        run: python tools/make_version_info.py version_info.txt
 
       # PyInstaller baut die .exe als Single-File mit eingebettetem Icon
       - name: Build EXE
+        # --noupx: nie mit UPX komprimieren, gepackte EXEs lösen bei
+        # Virenscannern besonders oft Fehlalarme aus.
+        # --version-file: Versionsinfo aus dem vorherigen Schritt.
         # --paths=.: Projektverzeichnis als Modul-Suchpfad hinzufügen,
         # damit lokale Packages (adapters/, plugins/) gefunden werden.
         # --hidden-import: Explizit alle dynamisch geladenen Module angeben,
@@ -31,8 +50,9 @@ jobs:
         # sodass neue Adapter/Plugins automatisch mitgebundelt werden.
         # --add-data: Assets (Icon, Logo) für Laufzeit einbetten.
         run: >-
-          pyinstaller --onefile --windowed
+          pyinstaller --onefile --windowed --noupx
           --icon=assets/icon.ico
+          --version-file=version_info.txt
           --name=SchildSpider
           --paths=.
           --add-data "assets;assets"
@@ -57,15 +77,16 @@ jobs:
 
       # Speichert die .exe als Build-Artifact (zum Download über die Actions-Seite)
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SchildSpider.exe
           path: dist/SchildSpider.exe
 
-      # Erstellt automatisch ein GitHub Release mit der .exe als Download-Asset
-      # Der Tag-Name (z.B. "v0.1") wird als Release-Titel verwendet
+      # Erstellt ein GitHub Release mit der .exe als Download-Asset.
+      # Nur bei Tags: ein manueller Test-Build veröffentlicht nichts.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/SchildSpider.exe
           generate_release_notes: true  # Erzeugt automatisch Changelog aus Commits

@@ -34,3 +34,6 @@ internal/
 test_webuntis.py
 .env
 csv-generieren.py
+
+# Im CI erzeugt (tools/make_version_info.py)
+version_info.txt

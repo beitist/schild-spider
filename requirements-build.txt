@@ -1,0 +1,7 @@
+# Werkzeuge für den Windows-Build (nur CI, nicht für den Betrieb nötig).
+#
+# Feste Version mit Absicht: PyInstaller bettet seinen eigenen Startcode
+# in die EXE ein. Ein unbemerktes Update (6.22.2 → 6.22.3) hat in v0.7.6
+# einen Fehlalarm von Microsoft Defender ausgelöst (Sabsik.EN.D!ml).
+# Update nur bewusst und mit einem Test-Build vorab.
+pyinstaller==6.22.2
