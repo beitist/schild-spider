@@ -191,6 +191,15 @@ Sind alle Stufen erschöpft (mehr als 100 identische Namen in einer Klasse), mel
 
 Namen mit diakritischen Zeichen werden vorher nach ASCII umgesetzt. Deutsche und nordische Sonderregeln gelten zuerst (`Müller` wird zu `mueller`, `Straße` zu `strasse`), alles Übrige verliert nur seine Akzente (`Nguyễn` wird zu `nguyen`, `Phạm` zu `pham`).
 
+Für **Klassennamen** ist das getrennt einstellbar, weil Klassenkürzel oft technische Codes sind. Unter **Einstellungen → Microsoft 365 → Umlaute in Klassennamen**:
+
+| Option | `BKÖ26A` wird zu |
+|---|---|
+| ausschreiben (Standard) | `bkoe26a` |
+| nur Punkte weglassen | `bko26a` |
+
+Personennamen folgen immer der deutschen Regel, unabhängig von dieser Einstellung. Passt die Einstellung nicht zum Bestand, hält die Prüfung jede betroffene Adresse für einen Klassenwechsel und korrigiert sie automatisch. Vor dem ersten Lauf also prüfen, wie eure vorhandenen Adressen geschrieben sind.
+
 ### 7. Verhalten bei Email-Änderung (z.B. Klassenwechsel)
 
 Welche Adresse gelten soll, entscheidet bereits die Ladephase und nicht das Plugin. Beim **Quelldaten laden** prüft Schild Spider jede SchILD-Adresse gegen das Template:

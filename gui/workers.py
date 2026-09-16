@@ -79,9 +79,9 @@ class LoadWorker(QObject):
                 "Email-Schema (z.B. Microsoft 365 deaktiviert oder ohne Domain)."
             )
             return [], []
-        plugin_name, (domain, template) = owner
+        plugin_name, scheme = owner
 
-        result = eg.check_emails([asdict(s) for s in all_students], domain, template)
+        result = eg.check_emails([asdict(s) for s in all_students], scheme)
         by_id = {s.school_internal_id: s for s in visible_students}
 
         auto: list[dict] = []
@@ -101,16 +101,13 @@ class LoadWorker(QObject):
         counts = Counter(
             result["status"][sid] for sid in by_id if sid in result["status"]
         )
-        self._emit_email_summary(
-            plugin_name, domain, template, counts, auto, manual, eg
-        )
+        self._emit_email_summary(plugin_name, scheme, counts, auto, manual, eg)
         return auto, manual
 
     def _emit_email_summary(
         self,
         plugin_name: str,
-        domain: str,
-        template: str,
+        scheme,
         counts,
         auto: list[dict],
         manual: list[dict],
@@ -118,8 +115,14 @@ class LoadWorker(QObject):
     ) -> None:
         """Schreibt die Zusammenfassung der Email-Prüfung ins Log."""
         total = sum(counts.values())
+        umlaute = (
+            "Klassen-Umlaute ausgeschrieben"
+            if scheme.class_umlauts == eg.CLASS_UMLAUT_EXPAND
+            else "Klassen-Umlaute ohne Punkte"
+        )
         self._emit(
-            f"Email-Prüfung ({plugin_name}, Schema {template}@{domain}): "
+            f"Email-Prüfung ({plugin_name}, Schema "
+            f"{scheme.template}@{scheme.domain}, {umlaute}): "
             f"{total} Schüler geprüft"
         )
         zeilen = [

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.email_generator import check_emails
+from core.email_generator import EmailScheme, check_emails
 from core.models import ChangeSet, ConfigField, StudentRecord, TeacherRecord
 
 # Status-Werte, die ein Zielsystem statt eines booleschen "success" liefern kann.
@@ -165,8 +165,8 @@ class PluginBase(ABC):
         """
         return []
 
-    def email_scheme(self) -> tuple[str, str] | None:
-        """Email-Schema des Plugins als (Domain, Template), sonst None.
+    def email_scheme(self) -> EmailScheme | None:
+        """Email-Schema des Plugins (Domain, Template, Umlautregel), sonst None.
 
         Plugins, die Adressen nach einem Template vergeben (z.B. M365 mit
         ``{k}.{n}``), melden es hier. Die Ladephase prüft damit bei jedem
@@ -184,7 +184,7 @@ class PluginBase(ABC):
         scheme = self.email_scheme()
         if scheme is None:
             return []
-        return check_emails(students, *scheme)["findings"]
+        return check_emails(students, scheme)["findings"]
 
     def get_write_back_data(self) -> list[dict]:
         """Gibt Daten zurück die an den Adapter zurückgeschrieben werden sollen.

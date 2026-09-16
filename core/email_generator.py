@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass
 
 # Sonderfälle, die NICHT einfach ihren Akzent verlieren dürfen: im
 # Deutschen wird ä zu ae und nicht zu a. Alles, was hier nicht steht,
@@ -96,6 +97,49 @@ def _strip_accents(ch: str) -> str:
     return unicodedata.normalize("NFC", ohne_akzente)
 
 
+# Umgang mit Umlauten im Klassenteil der Adresse. Für Personennamen gilt
+# immer die deutsche Regel (Müller → mueller); Klassenkürzel sind dagegen
+# oft technische Codes, in denen nur der Umlautpunkt wegfällt.
+CLASS_UMLAUT_EXPAND = "expand"  # BKÖ26A → bkoe26a
+CLASS_UMLAUT_STRIP = "strip"  # BKÖ26A → bko26a
+
+
+def _class_key(class_name: str, class_umlauts: str) -> str:
+    """Setzt einen Klassennamen für den Adressteil um."""
+    if class_umlauts == CLASS_UMLAUT_STRIP:
+        return _sanitize(_strip_diacritics(class_name))
+    return _sanitize(transliterate(class_name))
+
+
+def _strip_diacritics(text: str) -> str:
+    """Entfernt nur die Akzentzeichen: ö → o, é → e, ü → u.
+
+    Zeichen ohne akzentfreie Form (ß, ø, æ) würden dabei später beim
+    Filtern wegfallen — für sie greift weiterhin die Tabelle (ß → ss).
+    """
+    text = unicodedata.normalize("NFC", text)
+    result: list[str] = []
+    for ch in text:
+        ohne = _strip_accents(ch)
+        if ohne.isascii():
+            result.append(ohne)
+        elif ch.lower() in _TRANSLITERATION:
+            ersatz = _TRANSLITERATION[ch.lower()]
+            result.append(ersatz.capitalize() if ch.isupper() else ersatz)
+        else:
+            result.append(ohne)
+    return "".join(result)
+
+
+@dataclass(frozen=True)
+class EmailScheme:
+    """Wie ein Plugin Adressen bildet — Ergebnis von ``email_scheme()``."""
+
+    domain: str
+    template: str = "{v}.{n}"
+    class_umlauts: str = CLASS_UMLAUT_EXPAND
+
+
 def email_candidates(
     first_name: str,
     last_name: str,
@@ -103,6 +147,7 @@ def email_candidates(
     domain: str,
     template: str = "{v}.{n}",
     max_counter: int = 99,
+    class_umlauts: str = CLASS_UMLAUT_EXPAND,
 ):
     """Erzeugt Adress-Kandidaten in fester Eskalationsreihenfolge.
 
@@ -121,7 +166,7 @@ def email_candidates(
     """
     v = _sanitize(transliterate(first_name))
     n = _sanitize(transliterate(last_name))
-    k = _sanitize(transliterate(class_name))
+    k = _class_key(class_name, class_umlauts)
     base = _render_local_part(template, v, n, k)
 
     parts = _name_parts(first_name)
@@ -153,6 +198,7 @@ def generate_email(
     template: str = "{v}.{n}",
     existing_emails: set[str] | None = None,
     class_name: str = "",
+    class_umlauts: str = CLASS_UMLAUT_EXPAND,
 ) -> str | None:
     """Erzeugt eine freie Email-Adresse für einen einzelnen Schüler.
 
@@ -167,7 +213,7 @@ def generate_email(
     """
     taken = {(e or "").lower() for e in (existing_emails or ())}
     for candidate in email_candidates(
-        first_name, last_name, class_name, domain, template
+        first_name, last_name, class_name, domain, template, class_umlauts=class_umlauts
     ):
         if candidate.lower() not in taken:
             return candidate
@@ -179,6 +225,7 @@ def assign_emails(
     domain: str,
     template: str = "{v}.{n}",
     taken_emails=None,
+    class_umlauts: str = CLASS_UMLAUT_EXPAND,
 ) -> dict[str, str | None]:
     """Vergibt Adressen für mehrere Schüler kollisionsfrei und deterministisch.
 
@@ -203,6 +250,7 @@ def assign_emails(
             student.get("class_name", ""),
             domain,
             template,
+            class_umlauts=class_umlauts,
         ):
             if candidate.lower() not in taken:
                 chosen = candidate
@@ -270,6 +318,7 @@ def analyze_email(
     class_name: str,
     domain: str,
     template: str = "{v}.{n}",
+    class_umlauts: str = CLASS_UMLAUT_EXPAND,
 ) -> dict | None:
     """Prüft, ob eine bestehende Email noch zum Schema (Template) passt.
 
@@ -290,12 +339,12 @@ def analyze_email(
 
     v = _sanitize(transliterate(first_name))
     n = _sanitize(transliterate(last_name))
-    k = _sanitize(transliterate(class_name))
+    k = _class_key(class_name, class_umlauts)
     base = _render_local_part(template, v, n, k)
 
     # Passt die Adresse zu irgendeiner Stufe der Eskalationskette?
     for candidate in email_candidates(
-        first_name, last_name, class_name, domain, template
+        first_name, last_name, class_name, domain, template, class_umlauts=class_umlauts
     ):
         if local == candidate.rpartition("@")[0]:
             return None
@@ -327,7 +376,7 @@ EMAIL_DUPLICATE = "duplicate"
 EMAIL_COLLISION = "collision"
 
 
-def check_emails(students: list[dict], domain: str, template: str = "{v}.{n}") -> dict:
+def check_emails(students: list[dict], scheme: EmailScheme) -> dict:
     """Prüft ALLE Quell-Emails gegen das Schema und auf Dubletten.
 
     Jeder Schüler (mit ID und Klasse) bekommt genau einen Status:
@@ -351,6 +400,9 @@ def check_emails(students: list[dict], domain: str, template: str = "{v}.{n}") -
         Vorschläge haben die Felder school_internal_id, first_name,
         last_name, class_name, old_email, email, reason, old_class, checked.
     """
+    domain = scheme.domain
+    template = scheme.template
+    class_umlauts = scheme.class_umlauts
     own_domain = domain.strip().lower()
     status: dict[str, str] = {}
     pending: list[tuple[dict, str, str]] = []  # (schüler, grund, alte klasse)
@@ -377,6 +429,7 @@ def check_emails(students: list[dict], domain: str, template: str = "{v}.{n}") -
             klass,
             domain,
             template,
+            class_umlauts=class_umlauts,
         )
         if finding is None:
             status[sid] = EMAIL_OK
@@ -406,7 +459,9 @@ def check_emails(students: list[dict], domain: str, template: str = "{v}.{n}") -
         for s in students
         if str(s.get("school_internal_id", "")).strip() not in changing
     } - {""}
-    assigned = assign_emails([s for s, _, _ in pending], domain, template, taken)
+    assigned = assign_emails(
+        [s for s, _, _ in pending], domain, template, taken, class_umlauts=class_umlauts
+    )
 
     findings: list[dict] = []
     for s, reason, old_class in pending:

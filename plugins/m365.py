@@ -10,7 +10,12 @@ import string
 import time
 import warnings
 
-from core.email_generator import assign_emails
+from core.email_generator import (
+    CLASS_UMLAUT_EXPAND,
+    CLASS_UMLAUT_STRIP,
+    EmailScheme,
+    assign_emails,
+)
 from core.graph_client import GraphApiError, GraphClient
 from core.models import ChangeSet, ConfigField
 from core.plugin_loader import as_bool
@@ -43,6 +48,7 @@ class M365Plugin(PluginBase):
         sync_sus_groups: bool = True,
         sync_kuk_groups: bool = True,
         auto_write_back: bool = False,
+        class_umlauts: str = CLASS_UMLAUT_EXPAND,
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
@@ -60,6 +66,11 @@ class M365Plugin(PluginBase):
         self._sync_sus_groups = as_bool(sync_sus_groups)
         self._sync_kuk_groups = as_bool(sync_kuk_groups)
         self._auto_write_back = as_bool(auto_write_back)
+        self._class_umlauts = (
+            class_umlauts
+            if class_umlauts in (CLASS_UMLAUT_EXPAND, CLASS_UMLAUT_STRIP)
+            else CLASS_UMLAUT_EXPAND
+        )
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
@@ -163,6 +174,17 @@ class M365Plugin(PluginBase):
                 ],
             ),
             ConfigField(
+                key="class_umlauts",
+                label="Umlaute in Klassennamen (Adressteil)",
+                field_type="choice",
+                default=CLASS_UMLAUT_EXPAND,
+                choices=[
+                    (CLASS_UMLAUT_EXPAND, "ausschreiben: BKÖ26A wird zu bkoe26a"),
+                    (CLASS_UMLAUT_STRIP, "nur Punkte weglassen: BKÖ26A wird zu bko26a"),
+                ],
+                required=False,
+            ),
+            ConfigField(
                 key="auto_write_back",
                 label="Generierte Emails automatisch nach SchILD zurückschreiben",
                 field_type="bool",
@@ -203,6 +225,7 @@ class M365Plugin(PluginBase):
             sync_sus_groups=config.get("sync_sus_groups", True),
             sync_kuk_groups=config.get("sync_kuk_groups", True),
             auto_write_back=config.get("auto_write_back", False),
+            class_umlauts=config.get("class_umlauts", CLASS_UMLAUT_EXPAND),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -308,6 +331,7 @@ class M365Plugin(PluginBase):
             self._domain,
             self._email_template,
             self._taken_emails(changeset.new, changeset.changed),
+            class_umlauts=self._class_umlauts,
         )
         for student in pending:
             email = assigned.get(str(student.get("school_internal_id", "")))
@@ -397,6 +421,7 @@ class M365Plugin(PluginBase):
                 self._domain,
                 self._email_template,
                 self._taken_emails(students),
+                class_umlauts=self._class_umlauts,
             )
             if pending
             else {}
@@ -668,11 +693,15 @@ class M365Plugin(PluginBase):
     def get_write_back_data(self) -> list[dict]:
         return list(self._generated_emails)
 
-    def email_scheme(self) -> tuple[str, str] | None:
-        """Domain und Template für die Email-Prüfung beim Laden."""
+    def email_scheme(self) -> EmailScheme | None:
+        """Schema für die Email-Prüfung beim Laden."""
         if not self._domain:
             return None
-        return self._domain, self._email_template
+        return EmailScheme(
+            domain=self._domain,
+            template=self._email_template,
+            class_umlauts=self._class_umlauts,
+        )
 
     # --- Gruppen-Hilfsmethoden ---
 
