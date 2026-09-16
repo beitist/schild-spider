@@ -15,6 +15,7 @@ from core.email_generator import (
     CLASS_UMLAUT_STRIP,
     EmailScheme,
     assign_emails,
+    email_candidates,
     transliterate_class,
 )
 from core.graph_client import GraphApiError, GraphClient
@@ -384,6 +385,50 @@ class M365Plugin(PluginBase):
             "message": f"Verknüpft: {user.get('userPrincipalName', '')}",
         }
 
+    def _merken(self, student: dict, email: str, generiert: bool) -> None:
+        """Merkt eine Adresse für den Write-back nach SchILD.
+
+        Nur wenn wir sie selbst bestimmt haben — Adressen, die schon so in
+        SchILD stehen, müssen nicht zurückgeschrieben werden.
+        """
+        if not generiert:
+            return
+        self._generated_emails.append(
+            {
+                "school_internal_id": student["school_internal_id"],
+                "email": email,
+                "first_name": student.get("first_name", ""),
+                "last_name": student.get("last_name", ""),
+                "class_name": student.get("class_name", ""),
+            }
+        )
+
+    def _next_free_address(self, student: dict, belegt: set[str]) -> str | None:
+        """Nächste freie Adresse aus der Eskalationskette.
+
+        Greift, wenn die geplante Adresse wider Erwarten einem anderen
+        Konto gehört — etwa weil dessen Umbenennung fehlgeschlagen ist.
+        Jeder Kandidat wird live geprüft, weil der Manifest-Stand vom
+        Beginn des Laufs hier nachweislich nicht mehr stimmt.
+        """
+        for kandidat in email_candidates(
+            student.get("first_name", ""),
+            student.get("last_name", ""),
+            student.get("class_name", ""),
+            self._domain,
+            self._email_template,
+            class_umlauts=self._class_umlauts,
+        ):
+            if kandidat.lower() in belegt:
+                continue
+            try:
+                if self._graph.find_user_by_upn(kandidat) is None:
+                    return kandidat
+            except GraphApiError:
+                return None
+            belegt.add(kandidat.lower())
+        return None
+
     @staticmethod
     def _address_taken(sid: str, email: str, fremde_id: str) -> dict:
         """Fehlermeldung, wenn die Adresse einem anderen Schüler gehört."""
@@ -451,6 +496,17 @@ class M365Plugin(PluginBase):
             if pending
             else {}
         )
+        # Belegt sind der Bestand UND alle für diesen Lauf geplanten
+        # Adressen. Sonst könnte eine Ausweichadresse einem anderen
+        # Schüler desselben Laufs seine geplante Adresse wegnehmen und
+        # eine Kette von Ausweichvorgängen auslösen.
+        belegt = {e.lower() for e in self._existing_emails}
+        for s in students:
+            geplant = (s.get("email") or "").strip() or assigned.get(
+                str(s["school_internal_id"]), ""
+            )
+            if geplant:
+                belegt.add(geplant.lower())
         results: list[dict] = []
 
         for student in students:
@@ -474,33 +530,38 @@ class M365Plugin(PluginBase):
                         continue
                     was_generated = True
 
-                # Nur generierte Emails für Write-back merken — Adressen,
-                # die schon in SchILD stehen, müssen nicht zurück.
-                if was_generated:
-                    self._generated_emails.append(
-                        {
-                            "school_internal_id": sid,
-                            "email": email,
-                            "first_name": student.get("first_name", ""),
-                            "last_name": student.get("last_name", ""),
-                            "class_name": student.get("class_name", ""),
-                        }
-                    )
-
                 # Existiert der User schon (ohne employeeId)? Lokaler Check
                 # gegen den Manifest-Bestand statt API-Probe pro Schüler —
                 # get_manifest hat alle User der Domain bereits geladen.
+                ausweich_grund = ""
                 if email.lower() in manifest_emails:
                     existing_user = self._graph.find_user_by_upn(email)
                     if existing_user:
                         fremd = self._belongs_to_other(existing_user, sid)
-                        if fremd:
+                        if not fremd:
+                            # Herrenloses Konto mit dieser Adresse → übernehmen
+                            self._merken(student, email, was_generated)
+                            results.append(
+                                self._link_existing_user(existing_user, sid, student)
+                            )
+                            continue
+                        # Adresse gehört jemand anderem: nicht dessen Konto
+                        # kapern, sondern auf die nächste freie Stufe gehen.
+                        ausweich = self._next_free_address(student, belegt)
+                        if not ausweich:
                             results.append(self._address_taken(sid, email, fremd))
                             continue
-                        results.append(
-                            self._link_existing_user(existing_user, sid, student)
+                        ausweich_grund = (
+                            f"{email} gehört employeeId={fremd}, stattdessen {ausweich}"
                         )
-                        continue
+                        log.warning("%s: %s", sid, ausweich_grund)
+                        email = ausweich
+                        was_generated = True
+
+                # Adresse ist gesetzt → für den Write-back merken, damit
+                # SchILD auch eine Ausweichadresse mitbekommt.
+                self._merken(student, email, was_generated)
+                belegt.add(email.lower())
 
                 try:
                     self._create_account(student, email)
@@ -511,17 +572,50 @@ class M365Plugin(PluginBase):
                         existing_user = self._graph.find_user_by_upn(email)
                         if existing_user:
                             fremd = self._belongs_to_other(existing_user, sid)
-                            if fremd:
+                            if not fremd:
+                                results.append(
+                                    self._link_existing_user(
+                                        existing_user, sid, student
+                                    )
+                                )
+                                continue
+                            # Adresse entstand zwischen Manifest und jetzt
+                            # und gehört jemand anderem → ausweichen.
+                            ausweich = self._next_free_address(student, belegt)
+                            if not ausweich:
                                 results.append(self._address_taken(sid, email, fremd))
                                 continue
+                            log.warning(
+                                "%s: %s gehört employeeId=%s, stattdessen %s",
+                                sid,
+                                email,
+                                fremd,
+                                ausweich,
+                            )
+                            self._merken(student, ausweich, True)
+                            belegt.add(ausweich.lower())
+                            self._create_account(student, ausweich)
                             results.append(
-                                self._link_existing_user(existing_user, sid, student)
+                                {
+                                    "school_internal_id": sid,
+                                    "success": True,
+                                    "message": (
+                                        f"{ausweich} (Ausweichadresse: {email} "
+                                        f"gehört employeeId={fremd})"
+                                    ),
+                                }
                             )
                             continue
                     raise
 
                 results.append(
-                    {"school_internal_id": sid, "success": True, "message": email}
+                    {
+                        "school_internal_id": sid,
+                        "success": True,
+                        "message": f"{email} (Ausweichadresse: {ausweich_grund})"
+                        if ausweich_grund
+                        else email,
+                    }
                 )
 
             except GraphApiError as exc:
