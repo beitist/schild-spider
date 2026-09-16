@@ -189,6 +189,8 @@ Stufen ohne Datengrundlage werden übersprungen (Stufe 2 entfällt bei nur einem
 
 Sind alle Stufen erschöpft (mehr als 100 identische Namen in einer Klasse), meldet das Plugin den Schüler als Fehler zur manuellen Vergabe.
 
+Namen mit diakritischen Zeichen werden vorher nach ASCII umgesetzt. Deutsche und nordische Sonderregeln gelten zuerst (`Müller` wird zu `mueller`, `Straße` zu `strasse`), alles Übrige verliert nur seine Akzente (`Nguyễn` wird zu `nguyen`, `Phạm` zu `pham`).
+
 ### 7. Verhalten bei Email-Änderung (z.B. Klassenwechsel)
 
 Welche Adresse gelten soll, entscheidet bereits die Ladephase und nicht das Plugin. Beim **Quelldaten laden** prüft Schild Spider jede SchILD-Adresse gegen das Template:

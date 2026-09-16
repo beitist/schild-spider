@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
-# Mapping für gängige Sonderzeichen im deutschsprachigen Schulkontext
+# Sonderfälle, die NICHT einfach ihren Akzent verlieren dürfen: im
+# Deutschen wird ä zu ae und nicht zu a. Alles, was hier nicht steht,
+# wird über die Unicode-Zerlegung behandelt (siehe _strip_accents) —
+# damit sind auch vietnamesische Namen wie Nguyễn oder Phạm abgedeckt,
+# ohne dass die Tabelle jedes Zeichen einzeln kennen muss.
 _TRANSLITERATION: dict[str, str] = {
     # Deutsch
     "ä": "ae",
@@ -57,11 +62,19 @@ _TRANSLITERATION: dict[str, str] = {
 
 
 def transliterate(text: str) -> str:
-    """Ersetzt Sonderzeichen durch ASCII-Äquivalente.
+    """Wandelt Text in reines ASCII um.
 
-    Erkennt automatisch Großbuchstaben-Varianten (Ç → C, Ş → S, etc.)
-    anhand der Lowercase-Einträge in der Tabelle.
+    Zuerst greift die Tabelle oben (ä → ae, ß → ss), danach die
+    allgemeine Akzent-Entfernung (ỹ → y, ễ → e, ạ → a). Ohne den
+    zweiten Schritt würden unbekannte Zeichen später beim Filtern
+    ersatzlos wegfallen: aus "Nguyễn" würde "nguyn".
+
+    Erkennt Großbuchstaben-Varianten automatisch (Ç → C, Ş → S).
     """
+    # Zusammensetzen, falls die Quelle zerlegt liefert ("u" + Umlautpunkte).
+    # Sonst fände die Tabelle das ü nicht und es würde zu "u" statt "ue".
+    text = unicodedata.normalize("NFC", text)
+
     result: list[str] = []
     for ch in text:
         if ch in _TRANSLITERATION:
@@ -72,8 +85,15 @@ def transliterate(text: str) -> str:
                 replacement = replacement.capitalize()
             result.append(replacement)
         else:
-            result.append(ch)
+            result.append(_strip_accents(ch))
     return "".join(result)
+
+
+def _strip_accents(ch: str) -> str:
+    """Entfernt Akzente über die Unicode-Zerlegung: ỹ → y, ễ → e, ộ → o."""
+    zerlegt = unicodedata.normalize("NFD", ch)
+    ohne_akzente = "".join(c for c in zerlegt if not unicodedata.combining(c))
+    return unicodedata.normalize("NFC", ohne_akzente)
 
 
 def email_candidates(
