@@ -357,6 +357,17 @@ class M365Plugin(PluginBase):
                     taken.add(email)
         return taken
 
+    @staticmethod
+    def _belongs_to_other(user: dict, sid: str) -> str:
+        """Gehört dieses Konto schon einem ANDEREN Schüler? Gibt dessen ID zurück.
+
+        Ohne diese Prüfung würde ein Konto, dessen Adresse ein anderer
+        Schüler bekommen soll, einfach übernommen: employeeId überschrieben,
+        zwei Schüler auf einem Konto, der bisherige Inhaber ohne Zuordnung.
+        """
+        fremde_id = (user.get("employeeId") or "").strip()
+        return fremde_id if fremde_id and fremde_id != str(sid) else ""
+
     def _link_existing_user(self, user: dict, sid: str, student: dict) -> dict:
         """Verknüpft einen bestehenden M365-Account mit einer SchILD-ID."""
         self._graph.update_user(
@@ -371,6 +382,19 @@ class M365Plugin(PluginBase):
             "school_internal_id": sid,
             "success": True,
             "message": f"Verknüpft: {user.get('userPrincipalName', '')}",
+        }
+
+    @staticmethod
+    def _address_taken(sid: str, email: str, fremde_id: str) -> dict:
+        """Fehlermeldung, wenn die Adresse einem anderen Schüler gehört."""
+        return {
+            "school_internal_id": sid,
+            "success": False,
+            "message": (
+                f"Adresse {email} gehört bereits dem Konto mit "
+                f"employeeId={fremde_id} — nicht übernommen. Meist löst sich "
+                f"das beim nächsten Lauf, wenn dessen Umbenennung durch ist."
+            ),
         }
 
     def _create_account(self, student: dict, email: str) -> dict:
@@ -469,6 +493,10 @@ class M365Plugin(PluginBase):
                 if email.lower() in manifest_emails:
                     existing_user = self._graph.find_user_by_upn(email)
                     if existing_user:
+                        fremd = self._belongs_to_other(existing_user, sid)
+                        if fremd:
+                            results.append(self._address_taken(sid, email, fremd))
+                            continue
                         results.append(
                             self._link_existing_user(existing_user, sid, student)
                         )
@@ -482,6 +510,10 @@ class M365Plugin(PluginBase):
                     if "already exists" in str(exc).lower():
                         existing_user = self._graph.find_user_by_upn(email)
                         if existing_user:
+                            fremd = self._belongs_to_other(existing_user, sid)
+                            if fremd:
+                                results.append(self._address_taken(sid, email, fremd))
+                                continue
                             results.append(
                                 self._link_existing_user(existing_user, sid, student)
                             )

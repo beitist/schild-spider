@@ -382,17 +382,22 @@ class PluginApplyWorker(QObject):
             total_fail = 0
             label = self.plugin.source_label()
 
-            if cs.new:
-                phase = f"apply_new ({len(cs.new)} {label})"
-                self._emit(f"Lege {len(cs.new)} neue {label} an...")
-                ok, fail = self._report_results(self.plugin.apply_new(cs.new))
-                total_ok += ok
-                total_fail += fail
-
+            # Änderungen VOR Neuanlagen: Eine Adresse kann von einem
+            # bestehenden Datensatz zu einem neuen wandern, etwa wenn ein
+            # Zuzug nach ID zwischen zwei gleichnamige Schüler rutscht und
+            # die Kette neu durchzählt. Läuft die Neuanlage zuerst, ist die
+            # Adresse noch belegt und das Anlegen scheitert.
             if cs.changed:
                 phase = f"apply_changes ({len(cs.changed)} {label})"
                 self._emit(f"Aktualisiere {len(cs.changed)} {label}...")
                 ok, fail = self._report_results(self.plugin.apply_changes(cs.changed))
+                total_ok += ok
+                total_fail += fail
+
+            if cs.new:
+                phase = f"apply_new ({len(cs.new)} {label})"
+                self._emit(f"Lege {len(cs.new)} neue {label} an...")
+                ok, fail = self._report_results(self.plugin.apply_new(cs.new))
                 total_ok += ok
                 total_fail += fail
 
