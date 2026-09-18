@@ -95,7 +95,8 @@ def load_plugins(settings: dict) -> list[tuple[str, PluginBase]]:
 # v12: m365.email_change_mode (Verhalten bei Email-Änderung)
 # v13: m365 auto_write_back / sync_sus_groups / sync_kuk_groups (bool-Felder)
 # v14: m365.class_umlauts (Umlaute im Klassenteil der Adresse)
-SETTINGS_VERSION = 14
+# v15: m365.role_attribute / role_value_students / role_value_teachers
+SETTINGS_VERSION = 15
 
 
 def as_bool(value: object) -> bool:

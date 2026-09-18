@@ -51,6 +51,9 @@ class M365Plugin(PluginBase):
         sync_kuk_groups: bool = True,
         auto_write_back: bool = False,
         class_umlauts: str = CLASS_UMLAUT_EXPAND,
+        role_attribute: str = "",
+        role_value_students: str = "Schueler",
+        role_value_teachers: str = "Lehrer",
     ) -> None:
         self._domain = domain
         self._email_template = email_template or "{k}.{n}"
@@ -73,9 +76,25 @@ class M365Plugin(PluginBase):
             if class_umlauts in (CLASS_UMLAUT_EXPAND, CLASS_UMLAUT_STRIP)
             else CLASS_UMLAUT_EXPAND
         )
+        # Rollen-Kennzeichen in Exchange CustomAttribute 1-15 (Graph:
+        # onPremisesExtensionAttributes.extensionAttributeN). Grundlage für
+        # dynamische Verteilerlisten wie "alle Schüler" / "alle Lehrkräfte".
+        nummer = str(role_attribute or "").strip()
+        self._role_attr = (
+            f"extensionAttribute{nummer}"
+            if nummer.isdigit() and 1 <= int(nummer) <= 15
+            else ""
+        )
+        self._role_students = (
+            (role_value_students or "").strip() if self._role_attr else ""
+        )
+        self._role_teachers = (
+            (role_value_teachers or "").strip() if self._role_attr else ""
+        )
         self._graph = GraphClient(tenant_id, client_id, client_secret)
 
         # Caches (pro Lauf)
+        self._user_by_eid: dict[str, dict] = {}  # employeeId → Konto (Manifest)
         self._sus_cache: dict[str, str] = {}  # class_name → group_id
         self._kuk_cache: dict[str, str] = {}  # class_name → group_id
         self._kuk_processed: set[str] = set()  # Klassen, deren KuK schon bearbeitet
@@ -187,6 +206,29 @@ class M365Plugin(PluginBase):
                 required=False,
             ),
             ConfigField(
+                key="role_attribute",
+                label="Rollen-Kennzeichen in Attribut (für dynamische Verteilerlisten)",
+                field_type="choice",
+                default="",
+                choices=[("", "aus")]
+                + [(str(n), f"CustomAttribute {n}") for n in range(1, 16)],
+                required=False,
+            ),
+            ConfigField(
+                key="role_value_students",
+                label="Kennzeichen Schüler",
+                placeholder="Schueler",
+                default="Schueler",
+                required=False,
+            ),
+            ConfigField(
+                key="role_value_teachers",
+                label="Kennzeichen Lehrkräfte (leer = Lehrkräfte nicht kennzeichnen)",
+                placeholder="Lehrer",
+                default="Lehrer",
+                required=False,
+            ),
+            ConfigField(
                 key="auto_write_back",
                 label="Generierte Emails automatisch nach SchILD zurückschreiben",
                 field_type="bool",
@@ -228,6 +270,9 @@ class M365Plugin(PluginBase):
             sync_kuk_groups=config.get("sync_kuk_groups", True),
             auto_write_back=config.get("auto_write_back", False),
             class_umlauts=config.get("class_umlauts", CLASS_UMLAUT_EXPAND),
+            role_attribute=config.get("role_attribute", ""),
+            role_value_students=config.get("role_value_students", "Schueler"),
+            role_value_teachers=config.get("role_value_teachers", "Lehrer"),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -273,6 +318,9 @@ class M365Plugin(PluginBase):
         manifest: list[dict] = []
         # Email-Fallback: User ohne employeeId per Email matchen
         self._email_manifest: dict[str, dict] = {}
+        # Konten nach employeeId merken → apply_changes/apply_suspend sparen
+        # sich die Einzelabfrage pro Schüler.
+        self._user_by_eid = {u["employeeId"]: u for u in users if u.get("employeeId")}
 
         for u in users:
             eid = u.get("employeeId")
@@ -283,6 +331,8 @@ class M365Plugin(PluginBase):
                 "class_name": u.get("department") or "",
                 "email": u.get("userPrincipalName") or "",
             }
+            if self._role_students:
+                student_dict["role_marker"] = self._role_of(u)
             data_hash = self.compute_data_hash(student_dict)
             is_active = u.get("accountEnabled", True)
 
@@ -306,15 +356,42 @@ class M365Plugin(PluginBase):
         return manifest
 
     def compute_data_hash(self, student: dict) -> str:
-        parts = "|".join(
-            [
-                (student.get("first_name") or "").lower(),
-                (student.get("last_name") or "").lower(),
-                (student.get("class_name") or "").lower(),
-                (student.get("email") or "").lower(),
-            ]
-        )
-        return hashlib.sha256(parts.encode()).hexdigest()
+        felder = [
+            (student.get("first_name") or "").lower(),
+            (student.get("last_name") or "").lower(),
+            (student.get("class_name") or "").lower(),
+            (student.get("email") or "").lower(),
+        ]
+        # Kennzeichen nur mitzählen, wenn aktiv — sonst würden beim
+        # Update alle Schüler auf einmal als "geändert" erscheinen.
+        if self._role_students:
+            felder.append((student.get("role_marker") or "").strip())
+        return hashlib.sha256("|".join(felder).encode()).hexdigest()
+
+    def prepare_source(self, student: dict) -> None:
+        """SOLL-Kennzeichen für jeden Schüler (vom Plugin vorgegeben)."""
+        if self._role_students:
+            student["role_marker"] = self._role_students
+
+    # --- Rollen-Kennzeichen ---
+
+    def _role_of(self, user: dict) -> str:
+        """Aktueller Wert des Kennzeichen-Attributs eines Kontos."""
+        if not self._role_attr:
+            return ""
+        ext = user.get("onPremisesExtensionAttributes") or {}
+        return (ext.get(self._role_attr) or "").strip()
+
+    def _role_patch(self, value: str | None) -> dict:
+        """PATCH-Körper zum Setzen (Wert) oder Entfernen (None) des Kennzeichens."""
+        return {"onPremisesExtensionAttributes": {self._role_attr: value}}
+
+    def _user_for(self, sid: str) -> dict | None:
+        """Konto zu einer SchILD-ID: erst aus dem Manifest, sonst per API."""
+        cached = self._user_by_eid.get(str(sid))
+        if cached is not None:
+            return dict(cached)
+        return self._graph.find_user_by_employee_id(sid)
 
     def enrich_preview(self, changeset: ChangeSet) -> None:
         """Generiert Emails für neue Schüler, damit sie in der Vorschau sichtbar sind.
@@ -464,6 +541,8 @@ class M365Plugin(PluginBase):
                 "forceChangePasswordNextSignIn": True,
             },
         }
+        if self._role_students:
+            user_data.update(self._role_patch(self._role_students))
         created = self._graph.create_user(user_data)
 
         if self._license_sku_id:
@@ -634,7 +713,7 @@ class M365Plugin(PluginBase):
         for student in students:
             sid = student["school_internal_id"]
             try:
-                user = self._graph.find_user_by_employee_id(sid)
+                user = self._user_for(sid)
                 if not user:
                     # Fallback: per Email suchen (User ohne employeeId)
                     email = (student.get("email") or "").strip()
@@ -707,6 +786,12 @@ class M365Plugin(PluginBase):
                     )
                     message = f"Email fehlt in SchILD → Rückschreiben: {upn}"
 
+                if self._role_students and self._role_of(user) != self._role_students:
+                    updates.update(self._role_patch(self._role_students))
+                    message = (message + "; " if message else "") + (
+                        f"Kennzeichen {self._role_students} gesetzt"
+                    )
+
                 if updates:
                     updates["displayName"] = self._format_display_name(student)
                     self._graph.update_user(user_id, updates)
@@ -764,6 +849,7 @@ class M365Plugin(PluginBase):
                     "accountEnabled": False,
                     "employeeId": None,
                     "displayName": f"{old_user.get('displayName') or old_upn} (alt)",
+                    **self._clear_student_role(old_user),
                 },
             )
         except GraphApiError as exc:
@@ -784,11 +870,21 @@ class M365Plugin(PluginBase):
             "message": f"Neues Konto: {new_email} (alt deaktiviert: {old_upn})",
         }
 
+    def _clear_student_role(self, user: dict) -> dict:
+        """PATCH-Teil zum Entfernen des Schüler-Kennzeichens.
+
+        Nur wenn das Konto genau das Schüler-Kennzeichen trägt — ein von
+        Hand anders gesetzter Wert bleibt unangetastet.
+        """
+        if self._role_students and self._role_of(user) == self._role_students:
+            return self._role_patch(None)
+        return {}
+
     def apply_suspend(self, school_internal_ids: list[str]) -> list[dict]:
         results: list[dict] = []
         for sid in school_internal_ids:
             try:
-                user = self._graph.find_user_by_employee_id(sid)
+                user = self._user_for(sid)
                 if not user:
                     results.append(
                         {
@@ -799,7 +895,12 @@ class M365Plugin(PluginBase):
                     )
                     continue
 
-                self._graph.update_user(user["id"], {"accountEnabled": False})
+                # Kennzeichen entfernen, damit Abgänger aus der
+                # dynamischen Verteilerliste fallen.
+                self._graph.update_user(
+                    user["id"],
+                    {"accountEnabled": False, **self._clear_student_role(user)},
+                )
                 results.append(
                     {"school_internal_id": sid, "success": True, "message": ""}
                 )
@@ -1000,7 +1101,140 @@ class M365Plugin(PluginBase):
     def compute_group_diff(
         self, all_students: list[dict], teachers: list[dict]
     ) -> list[dict]:
-        """Berechnet geplante Gruppenänderungen (SOLL vs IST) für die Vorschau."""
+        """Berechnet geplante Gruppen- und Kennzeichen-Änderungen für die Vorschau.
+
+        Die Lehrkräfte-Kennzeichen laufen unabhängig vom Gruppen-Sync, weil
+        sie für die dynamischen Verteilerlisten gebraucht werden.
+        """
+        changes: list[dict] = []
+        if self._role_teachers:
+            student_ids = {
+                str(s.get("school_internal_id", "")) for s in all_students
+            } - {""}
+            changes.extend(self._diff_teacher_roles(teachers, student_ids))
+        changes.extend(self._compute_group_changes(all_students, teachers))
+        return changes
+
+    def _diff_teacher_roles(
+        self, teachers: list[dict], student_ids: set[str]
+    ) -> list[dict]:
+        """Kennzeichen für Lehrerkonten: setzen, wo es fehlt; entfernen bei Abgängern.
+
+        Die Konten werden über die dienstliche Adresse aus SchILD gefunden,
+        auch außerhalb der Schüler-Domain. Abgänger sind Konten mit dem
+        Lehrer-Kennzeichen, deren Adresse nicht mehr in SchILD steht.
+        """
+        wert = self._role_teachers
+        by_upn = {
+            (u.get("userPrincipalName") or "").lower(): u
+            for u in (self._all_users or [])
+        }
+        changes: list[dict] = []
+        soll: set[str] = set()
+        ohne_mail = 0
+        nicht_gefunden: list[str] = []
+        uebersprungen: list[str] = []
+
+        for t in teachers:
+            name = f"{t.get('last_name', '')}, {t.get('first_name', '')}".strip(", ")
+            email = (t.get("email") or "").strip().lower()
+            if not email:
+                ohne_mail += 1
+                continue
+            soll.add(email)
+            user = by_upn.get(email)
+            if user is None:
+                try:
+                    user = self._graph.find_user_by_upn(email)
+                except GraphApiError as exc:
+                    warnings.warn(f"Lehrkraft {name} ({email}): {exc}")
+                    continue
+            if user is None:
+                nicht_gefunden.append(f"{name} ({email})")
+                continue
+            # Nie ein Schülerkonto als Lehrkraft kennzeichnen
+            if str(user.get("employeeId") or "") in student_ids:
+                uebersprungen.append(f"{name} ({email})")
+                continue
+            alt = self._role_of(user)
+            if alt == wert:
+                continue
+            detail = f"{alt} → {wert}" if alt else f"setzen: {wert}"
+            changes.append(
+                {
+                    "id": f"role:{user['id']}:set",
+                    "group_type": "role",
+                    "group_name": "Lehrkräfte kennzeichnen",
+                    "group_id": "",
+                    "action": "set_role",
+                    "member_name": name,
+                    "member_id": user["id"],
+                    "class_name": "Lehrkräfte kennzeichnen",
+                    "display_text": name,
+                    "display_detail": detail,
+                }
+            )
+
+        # Abgänger: gekennzeichnet, aber nicht mehr in der SchILD-Liste
+        try:
+            markiert = self._graph.list_users_by_extension_attribute(
+                self._role_attr, wert
+            )
+        except GraphApiError as exc:
+            warnings.warn(
+                f"Gekennzeichnete Lehrkräfte nicht abrufbar ({exc}) — "
+                f"Abgänger werden in diesem Lauf nicht erkannt."
+            )
+            markiert = []
+        for u in markiert:
+            upn = (u.get("userPrincipalName") or "").lower()
+            if upn and upn not in soll:
+                name = u.get("displayName") or upn
+                changes.append(
+                    {
+                        "id": f"role:{u['id']}:clear",
+                        "group_type": "role",
+                        "group_name": "Kennzeichen entfernen (nicht mehr in SchILD)",
+                        "group_id": "",
+                        "action": "clear_role",
+                        "member_name": name,
+                        "member_id": u["id"],
+                        "class_name": "Kennzeichen entfernen (nicht mehr in SchILD)",
+                        "display_text": name,
+                        "display_detail": f"{upn}: {wert} entfernen",
+                    }
+                )
+
+        gesetzt = sum(1 for c in changes if c["action"] == "set_role")
+        entfernt = len(changes) - gesetzt
+        log.info(
+            "Lehrkräfte-Kennzeichen '%s' in %s: %d setzen, %d entfernen",
+            wert,
+            self._role_attr,
+            gesetzt,
+            entfernt,
+        )
+        if ohne_mail:
+            log.info("  %d Lehrkräfte ohne dienstliche Adresse in SchILD", ohne_mail)
+        if nicht_gefunden:
+            log.warning(
+                "  %d Lehrkräfte ohne M365-Konto: %s",
+                len(nicht_gefunden),
+                ", ".join(nicht_gefunden[:10])
+                + (" ..." if len(nicht_gefunden) > 10 else ""),
+            )
+        if uebersprungen:
+            log.warning(
+                "  %d dienstliche Adressen gehören einem Schülerkonto, übersprungen: %s",
+                len(uebersprungen),
+                ", ".join(uebersprungen),
+            )
+        return changes
+
+    def _compute_group_changes(
+        self, all_students: list[dict], teachers: list[dict]
+    ) -> list[dict]:
+        """Klassen- und Lehrergruppen (SOLL vs IST)."""
         if not self._sync_sus_groups and not self._sync_kuk_groups:
             log.info("Gruppen-Sync deaktiviert (Klassen- und Lehrergruppen).")
             return []
@@ -1427,6 +1661,21 @@ class M365Plugin(PluginBase):
                             "id": str(idx),
                             "method": "DELETE",
                             "url": f"/groups/{group_id}/members/{ch['member_id']}/$ref",
+                        },
+                    )
+                )
+
+            elif action in ("set_role", "clear_role"):
+                wert = self._role_teachers if action == "set_role" else None
+                prepared.append(
+                    (
+                        ch,
+                        {
+                            "id": str(idx),
+                            "method": "PATCH",
+                            "url": f"/users/{ch['member_id']}",
+                            "headers": {"Content-Type": "application/json"},
+                            "body": self._role_patch(wert),
                         },
                     )
                 )

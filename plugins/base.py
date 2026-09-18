@@ -122,6 +122,15 @@ class PluginBase(ABC):
         """
         return students
 
+    def prepare_source(self, student: dict) -> None:
+        """Ergänzt abgeleitete SOLL-Felder, bevor der Hash berechnet wird.
+
+        Für Werte, die nicht aus der Quelle kommen, sondern vom Plugin
+        vorgegeben werden (z.B. ein Rollen-Kennzeichen). So bleibt
+        compute_data_hash frei von Nebenwirkungen, und die Vorschau kann
+        die Abweichung benennen. Standard: nichts.
+        """
+
     def needs_photo_update(self, student: dict, target: dict) -> bool:
         """Entscheidet, ob das lokale Foto ins Zielsystem geschrieben werden muss.
 

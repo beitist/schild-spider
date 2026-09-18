@@ -232,7 +232,32 @@ Damit die neue Adresse auch in Microsoft 365 ankommt, stehen unter **Einstellung
 | **Adresse ändern** (Standard) | UPN und mailNickname werden am bestehenden Konto umbenannt — Postfach, OneDrive und Gruppen bleiben. Zusätzlich wird versucht, die primäre Mailadresse (`mail`) nachzuziehen; lehnt Exchange das ab, erscheint eine Warnung mit alt → neu zum manuellen Nachziehen. |
 | **Neues Konto anlegen, altes deaktivieren** | Neues Konto mit der neuen Adresse (inkl. Lizenz), danach wird das alte Konto deaktiviert, seine employeeId entfernt und der Anzeigename mit „(alt)" markiert. |
 
-### 8. Weitere Optionen
+### 8. Rollen-Kennzeichen und dynamische Verteilerlisten
+
+Schild Spider kann jedes Schülerkonto und jedes Lehrerkonto mit einem Kennzeichen versehen, etwa `Schueler` und `Lehrer`. Es landet in einem der 15 benutzerdefinierten Exchange-Attribute. Damit lassen sich in Exchange **dynamische Verteilerlisten** bauen, die sich selbst aktuell halten, zum Beispiel eine Rundmail-Adresse für alle Schülerinnen und Schüler, an die nur Lehrkräfte schreiben dürfen.
+
+Einstellungen unter **Microsoft 365**:
+
+| Option | Wirkung |
+|---|---|
+| **Rollen-Kennzeichen in Attribut** | Welches der Attribute 1 bis 15 verwendet wird, oder aus. Ein bisher **ungenutztes** Attribut wählen, das Tool überschreibt den Inhalt. |
+| **Kennzeichen Schüler** | Wert für Schülerkonten, Standard `Schueler`. |
+| **Kennzeichen Lehrkräfte** | Wert für Lehrerkonten, Standard `Lehrer`. Leer lassen, um Lehrkräfte nicht zu kennzeichnen. |
+
+Verhalten:
+- **Schüler** bekommen das Kennzeichen beim Anlegen, bestehende Konten beim nächsten Anwenden. Beim Deaktivieren wird es entfernt, damit Abgänger aus der Liste fallen.
+- **Lehrkräfte** werden über die dienstliche Adresse aus SchILD gefunden, auch in einer anderen Domain. Die Änderungen erscheinen in der Vorschau unter „Kennzeichen Lehrkräfte". Konten mit Lehrer-Kennzeichen, deren Adresse nicht mehr in SchILD steht, werden zum Entfernen vorgeschlagen.
+- Nach dem Einschalten erscheinen beim ersten Lauf **alle** Schüler als geändert, weil ihnen das Kennzeichen noch fehlt. Das ist einmalig.
+
+Beispiel für Exchange, einmalig in der Exchange-Online-PowerShell (hier Attribut 1):
+
+```powershell
+New-DynamicDistributionGroup -Name "Alle Schueler" -Alias alle-schueler -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Schueler"
+New-DynamicDistributionGroup -Name "Alle Lehrkraefte" -Alias alle-lehrer -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Lehrer"
+Set-DynamicDistributionGroup -Identity alle-schueler -AcceptMessagesOnlyFromSendersOrMembers alle-lehrer,sekretariat@example.de -HiddenFromAddressListsEnabled $true
+```
+
+### 9. Weitere Optionen
 
 | Option | Wirkung |
 |---|---|

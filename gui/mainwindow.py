@@ -601,6 +601,9 @@ class MainWindow(QMainWindow):
             "Foto-Updates", cs.photo_updates, excluded, detail="Neues Foto"
         )
         self._add_preview_group_category(
+            "Kennzeichen Lehrkräfte", cs.group_changes, excluded, "role"
+        )
+        self._add_preview_group_category(
             "Klassengruppen (SuS)", cs.group_changes, excluded, "sus"
         )
         self._add_preview_group_category(

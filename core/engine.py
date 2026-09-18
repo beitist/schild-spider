@@ -17,6 +17,7 @@ def compute_changeset(
     source_map: dict[str, dict] = {}
     for student in source:
         d = asdict(student)
+        plugin.prepare_source(d)
         d["_data_hash"] = plugin.compute_data_hash(d)
         source_map[student.school_internal_id] = d
 
@@ -87,6 +88,7 @@ _DIFF_LABELS: tuple[tuple[str, str], ...] = (
     ("last_name", "Nachname"),
     ("first_name", "Vorname"),
     ("dob", "Geburtsdatum"),
+    ("role_marker", "Kennzeichen"),
 )
 
 

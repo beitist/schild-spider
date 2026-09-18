@@ -174,9 +174,12 @@ class GraphClient:
 
     # --- User-Operationen ---
 
+    # onPremisesExtensionAttributes muss explizit angefordert werden, sonst
+    # fehlt es in der Antwort (Rollen-Kennzeichen in CustomAttribute 1-15).
     _USER_SELECT = (
         "id,employeeId,givenName,surname,department,"
-        "userPrincipalName,accountEnabled,mail,displayName"
+        "userPrincipalName,accountEnabled,mail,displayName,"
+        "onPremisesExtensionAttributes"
     )
 
     def list_users(self, domain: str) -> list[dict]:
@@ -197,6 +200,25 @@ class GraphClient:
         )
         log.debug("list_users: %d mit Domain %s", len(users), domain_suffix)
         return users
+
+    def list_users_by_extension_attribute(
+        self, attribute: str, value: str
+    ) -> list[dict]:
+        """Alle User mit einem bestimmten Wert in extensionAttribute1-15.
+
+        Domänenübergreifend — damit werden auch Konten gefunden, die nicht
+        in der Schüler-Domain liegen (z.B. Lehrkräfte).
+        attribute: "extensionAttribute1" … "extensionAttribute15"
+        """
+        safe_value = value.replace("'", "''")
+        return self._request_paged(
+            "/users",
+            params={
+                "$select": self._USER_SELECT,
+                "$filter": f"onPremisesExtensionAttributes/{attribute} eq '{safe_value}'",
+                "$count": "true",
+            },
+        )
 
     def create_user(self, user_data: dict) -> dict:
         """Legt einen neuen User an."""
