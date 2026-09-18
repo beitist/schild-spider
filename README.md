@@ -249,7 +249,26 @@ Verhalten:
 - **Lehrkräfte** werden über die dienstliche Adresse aus SchILD gefunden, auch in einer anderen Domain. Die Änderungen erscheinen in der Vorschau unter „Kennzeichen Lehrkräfte". Konten mit Lehrer-Kennzeichen, deren Adresse nicht mehr in SchILD steht, werden zum Entfernen vorgeschlagen.
 - Nach dem Einschalten erscheinen beim ersten Lauf **alle** Schüler als geändert, weil ihnen das Kennzeichen noch fehlt. Das ist einmalig.
 
-Beispiel für Exchange, einmalig in der Exchange-Online-PowerShell (hier Attribut 1):
+**Exchange-Online-PowerShell vorbereiten.** Die Befehle laufen in der Exchange-Online-PowerShell. Auf einem Windows-Rechner reicht die normale PowerShell, Administratorrechte auf dem Rechner sind nicht nötig:
+
+```powershell
+# Einmalig: Modul für den eigenen Benutzer installieren
+# (Frage nach dem nicht vertrauenswürdigen Repository "PSGallery" mit J bestätigen)
+Install-Module ExchangeOnlineManagement -Scope CurrentUser
+
+# Falls das Modul wegen der Ausführungsrichtlinie nicht lädt, einmalig:
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+# Bei jeder Sitzung: mit einem Exchange-Admin-Konto anmelden
+Connect-ExchangeOnline -UserPrincipalName admin@example.de
+
+# Am Ende der Sitzung
+Disconnect-ExchangeOnline
+```
+
+Alternativ gibt es im Azure-Portal oben in der Leiste die **Cloud Shell** im Browser. Sie setzt laut Microsoft aber ein Azure-Abonnement voraus, das viele Schul-Tenants nicht haben.
+
+**Verteilerlisten anlegen**, einmalig (hier Attribut 1). Am besten erst, nachdem Schild Spider einmal gelaufen ist, damit die Listen nicht leer starten:
 
 ```powershell
 New-DynamicDistributionGroup -Name "Alle Schueler" -Alias alle-schueler -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Schueler"
