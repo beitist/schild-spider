@@ -260,7 +260,7 @@ Install-Module ExchangeOnlineManagement -Scope CurrentUser
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 # Bei jeder Sitzung: mit einem Exchange-Admin-Konto anmelden
-Connect-ExchangeOnline -UserPrincipalName admin@example.de
+Connect-ExchangeOnline -UserPrincipalName admin@eure-schule.de
 
 # Am Ende der Sitzung
 Disconnect-ExchangeOnline
@@ -268,13 +268,65 @@ Disconnect-ExchangeOnline
 
 Alternativ gibt es im Azure-Portal oben in der Leiste die **Cloud Shell** im Browser. Sie setzt laut Microsoft aber ein Azure-Abonnement voraus, das viele Schul-Tenants nicht haben.
 
-**Verteilerlisten anlegen**, einmalig (hier Attribut 1). Am besten erst, nachdem Schild Spider einmal gelaufen ist, damit die Listen nicht leer starten:
+> **Alle Adressen in den folgenden Befehlen sind Platzhalter** (`eure-schule.de`, `sekretariat@…`). Vor dem Ausführen durch eure echten Adressen ersetzen. Jede genannte Adresse muss in Exchange existieren. Fehlt eine, bricht der gesamte Befehl mit „Objekt … nicht gefunden" ab und ändert **nichts**, auch nicht die übrigen Angaben.
+
+**1. Verteilerlisten anlegen**, einmalig, hier mit Attribut 1. Am besten erst, nachdem Schild Spider einmal gelaufen ist, damit die Listen nicht leer starten:
 
 ```powershell
-New-DynamicDistributionGroup -Name "Alle Schueler" -Alias alle-schueler -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Schueler"
-New-DynamicDistributionGroup -Name "Alle Lehrkraefte" -Alias alle-lehrer -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Lehrer"
-Set-DynamicDistributionGroup -Identity alle-schueler -AcceptMessagesOnlyFromSendersOrMembers alle-lehrer,sekretariat@example.de -HiddenFromAddressListsEnabled $true
+New-DynamicDistributionGroup -Name "Alle Schueler" -Alias alle-schueler -PrimarySmtpAddress alle-schueler@eure-schule.de -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Schueler"
+New-DynamicDistributionGroup -Name "Alle Lehrkraefte" -Alias alle-lehrer -PrimarySmtpAddress alle-lehrer@eure-schule.de -IncludedRecipients MailboxUsers -ConditionalCustomAttribute1 "Lehrer"
 ```
+
+`-PrimarySmtpAddress` legt die Adresse fest. Ohne diese Angabe bildet Exchange sie aus dem Alias und der **Standard-Domain des Tenants**, die nicht die Schul-Domain sein muss. Bei einer schon angelegten Liste lässt sie sich nachträglich setzen:
+
+```powershell
+Set-DynamicDistributionGroup -Identity alle-schueler -PrimarySmtpAddress alle-schueler@eure-schule.de
+```
+
+**2. Absender beschränken.** Steht eine Gruppe in der Liste, dürfen alle ihre Mitglieder senden. Trägt man „alle-lehrer" bei sich selbst ein, dürfen die Lehrkräfte also untereinander Rundmails schicken:
+
+```powershell
+# An alle Schüler schreiben: alle Lehrkräfte und das Sekretariat
+Set-DynamicDistributionGroup -Identity alle-schueler -AcceptMessagesOnlyFromSendersOrMembers alle-lehrer,sekretariat@eure-schule.de
+
+# An alle Lehrkräfte schreiben: die Lehrkräfte selbst und das Sekretariat
+Set-DynamicDistributionGroup -Identity alle-lehrer -AcceptMessagesOnlyFromSendersOrMembers alle-lehrer,sekretariat@eure-schule.de
+```
+
+Dieser Befehl **ersetzt** die bisherige Liste. Einzelne Absender später ergänzen oder entfernen, ohne die übrigen zu verlieren:
+
+```powershell
+Set-DynamicDistributionGroup -Identity alle-schueler -AcceptMessagesOnlyFromSendersOrMembers @{Add="schulleitung@eure-schule.de"}
+Set-DynamicDistributionGroup -Identity alle-schueler -AcceptMessagesOnlyFromSendersOrMembers @{Remove="schulleitung@eure-schule.de"}
+```
+
+**3. Sichtbarkeit im Adressbuch.** Neu angelegte Listen sind sichtbar, und so sollte es bleiben: Die Lehrkräfte finden die Adresse dann im Adressbuch, und wer nicht senden darf, wird ohnehin abgewiesen. Wer die Listen trotzdem verbergen will, setzt `-HiddenFromAddressListsEnabled $true`. Eine verborgene Liste lässt sich in Outlook nicht über ihren Namen auswählen, nur über die vollständige Adresse.
+
+**4. Prüfen:**
+
+```powershell
+# Adresse, Sichtbarkeit und erlaubte Absender beider Listen
+Get-DynamicDistributionGroup | Format-List Name,PrimarySmtpAddress,HiddenFromAddressListsEnabled,AcceptMessagesOnlyFromSendersOrMembers
+
+# Trägt ein Konto das Kennzeichen, und hat es ein Postfach (UserMailbox)?
+Get-Recipient schueler@eure-schule.de | Format-List Name,RecipientTypeDetails,CustomAttribute1
+
+# Wie viele passen gerade auf den Filter, und wie viele stehen in der gespeicherten Liste?
+(Get-Recipient -ResultSize Unlimited -RecipientPreviewFilter (Get-DynamicDistributionGroup alle-schueler).RecipientFilter).Count
+(Get-DynamicDistributionGroupMember -Identity alle-schueler -ResultSize Unlimited).Count
+```
+
+**Mitglieder erscheinen verzögert.** Exchange Online berechnet die Mitglieder dynamischer Listen nicht live. Nach dem Anlegen dauert es laut Microsoft etwa zwei Stunden, danach wird die Liste einmal täglich aktualisiert. Neue Lehrkräfte dürfen deshalb erst nach der nächsten Aktualisierung an die Listen schreiben. Sofort neu berechnen, höchstens einmal pro Stunde:
+
+```powershell
+Set-DynamicDistributionGroup -Identity alle-schueler -ForceMembershipRefresh
+```
+
+**Häufige Stolpersteine:**
+- **„Objekt … nicht gefunden"**: Eine der angegebenen Adressen existiert nicht. Der Befehl hat nichts geändert.
+- **„A positional parameter cannot be found"**: Zusätzliche Angaben an einem `Get-…`- oder `Format-List`-Befehl. Diese Befehle zeigen nur an, geändert wird ausschließlich mit `Set-…`.
+- **Outlook meldet die Adresse als ungültig**: Mit dem Prüfbefehl die tatsächliche Adresse unter `PrimarySmtpAddress` nachsehen und ob die Liste verborgen ist.
+- **Liste bleibt leer**: Die Berechnung steht noch aus, oder den Konten fehlt das Kennzeichen oder das Postfach. Der Prüfbefehl für ein einzelnes Konto zeigt beides.
 
 ### 9. Weitere Optionen
 
